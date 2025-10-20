@@ -243,6 +243,7 @@ class RU:
     ORDER_CANCELED = "↩️ Заказ отменён. Прогресс сброшен."
     ORDER_RESUME = "🧾 Продолжаем заказ «{title}». Кликай, чтобы продвинуться."
     INSUFFICIENT_FUNDS = "💸 Не хватает средств для покупки. Подкопите ещё немного и возвращайтесь!"
+    BOOST_LOCKED = "🔒 Этот буст станет доступен с {lvl} уровня."
     PURCHASE_OK = "🛒 Покупка успешна! Улучшение применено."
     UPGRADE_OK = "🔼 Повышение выполнено! Уровень растёт."
     EQUIP_OK = "🧩 Экипировка активирована — стиль и статы на высоте!"
@@ -894,6 +895,7 @@ class Boost(Base):
     base_cost: Mapped[int] = mapped_column(Integer)
     growth: Mapped[float] = mapped_column(Float)
     step_value: Mapped[float] = mapped_column(Float)
+    min_level: Mapped[int] = mapped_column(Integer, default=1)
 
 
 class UserBoost(Base):
@@ -1175,6 +1177,12 @@ async def ensure_schema(session: AsyncSession) -> None:
     if "trend_multiplier" not in user_order_columns:
         await session.execute(text("ALTER TABLE user_orders ADD COLUMN trend_multiplier FLOAT NOT NULL DEFAULT 1.0"))
 
+    boost_columns = await _existing_columns("boosts")
+    if "min_level" not in boost_columns:
+        await session.execute(
+            text("ALTER TABLE boosts ADD COLUMN min_level INTEGER NOT NULL DEFAULT 1")
+        )
+
     item_columns = await _existing_columns("items")
     if "obtain" not in item_columns:
         await session.execute(text("ALTER TABLE items ADD COLUMN obtain TEXT"))
@@ -1226,27 +1234,195 @@ SEED_ORDERS = [
 ]
 
 SEED_BOOSTS = [
-    {"code": "reward_mastery", "name": "🎯 Награда", "type": "reward", "base_cost": 300, "growth": 1.28, "step_value": 0.10},
-    {"code": "finger_training", "name": "🧪 Тренировка пальцев", "type": "cp", "base_cost": 380, "growth": 1.25, "step_value": 1},
-    {"code": "passive_income_plus", "name": "💼 Пассивный доход", "type": "passive", "base_cost": 460, "growth": 1.27, "step_value": 0.10},
-    {"code": "click_overdrive", "name": "⚡️ Клик", "type": "cp", "base_cost": 520, "growth": 1.25, "step_value": 1},
-    {"code": "accelerated_learning", "name": "🧠 Ускоренное обучение", "type": "xp", "base_cost": 560, "growth": 1.22, "step_value": 0.08},
-    {"code": "critical_strike", "name": "💥 Крит-удар", "type": "crit", "base_cost": 700, "growth": 1.28, "step_value": 0.02},
-    {"code": "anti_brak", "name": "🧿 Антибрак", "type": "event_protection", "base_cost": 740, "growth": 1.26, "step_value": 0.10},
-    {"code": "project_insurance", "name": "🧯 Страховка проекта", "type": "event_shield", "base_cost": 900, "growth": 1.28, "step_value": 1},
-    {"code": "process_optimization", "name": "🎛️ Оптимизация процессов", "type": "passive", "base_cost": 760, "growth": 1.27, "step_value": 0.06},
-    {"code": "combo_click", "name": "🔗 Комбо-клик", "type": "combo", "base_cost": 820, "growth": 1.25, "step_value": 0.2},
-    {"code": "team_synergy", "name": "👥 Слаженная команда", "type": "team_income", "base_cost": 860, "growth": 1.28, "step_value": 0.07},
-    {"code": "ergonomics", "name": "🪑 Эргономика", "type": "ratelimit", "base_cost": 900, "growth": 1.30, "step_value": 1},
-    {"code": "requirement_relief", "name": "🧭 Снижение требований", "type": "req_clicks", "base_cost": 980, "growth": 1.35, "step_value": 0.03},
-    {"code": "quick_briefs", "name": "📦 Быстрые брифы", "type": "free_order", "base_cost": 1040, "growth": 1.28, "step_value": 0.03},
-    {"code": "contractor_discount", "name": "🧾 Скидки подрядчикам", "type": "team_discount", "base_cost": 1080, "growth": 1.30, "step_value": 0.05},
-    {"code": "deep_offline", "name": "💤 Глубокий офлайн", "type": "offline_cap", "base_cost": 1140, "growth": 1.32, "step_value": 7200},
-    {"code": "tight_deadlines", "name": "⏱️ Сжатые дедлайны", "type": "rush_reward", "base_cost": 1200, "growth": 1.30, "step_value": 0.05},
-    {"code": "gear_tuning", "name": "🧰 Тюнинг экипировки", "type": "equipment_eff", "base_cost": 1280, "growth": 1.35, "step_value": 0.05},
-    {"code": "night_flow", "name": "🌙 Ночной поток", "type": "night_passive", "base_cost": 1360, "growth": 1.33, "step_value": 0.12},
-    {"code": "shop_wholesale", "name": "🛍️ Опт в магазине", "type": "shop_discount", "base_cost": 1420, "growth": 1.33, "step_value": 0.04},
-    {"code": "premium_projects", "name": "🎯 Премиум-проекты", "type": "high_order_reward", "base_cost": 1500, "growth": 1.34, "step_value": 0.08},
+    {
+        "code": "reward_mastery",
+        "name": "🎯 Награда",
+        "type": "reward",
+        "base_cost": 300,
+        "growth": 1.28,
+        "step_value": 0.10,
+        "min_level": 1,
+    },
+    {
+        "code": "finger_training",
+        "name": "🧪 Тренировка пальцев",
+        "type": "cp",
+        "base_cost": 380,
+        "growth": 1.25,
+        "step_value": 1,
+        "min_level": 1,
+    },
+    {
+        "code": "passive_income_plus",
+        "name": "💼 Пассивный доход",
+        "type": "passive",
+        "base_cost": 460,
+        "growth": 1.27,
+        "step_value": 0.10,
+        "min_level": 1,
+    },
+    {
+        "code": "click_overdrive",
+        "name": "⚡️ Клик",
+        "type": "cp",
+        "base_cost": 520,
+        "growth": 1.25,
+        "step_value": 1,
+        "min_level": 1,
+    },
+    {
+        "code": "accelerated_learning",
+        "name": "🧠 Ускоренное обучение",
+        "type": "xp",
+        "base_cost": 560,
+        "growth": 1.22,
+        "step_value": 0.08,
+        "min_level": 1,
+    },
+    {
+        "code": "critical_strike",
+        "name": "💥 Крит-удар",
+        "type": "crit",
+        "base_cost": 700,
+        "growth": 1.28,
+        "step_value": 0.02,
+        "min_level": 3,
+    },
+    {
+        "code": "anti_brak",
+        "name": "🧿 Антибрак",
+        "type": "event_protection",
+        "base_cost": 740,
+        "growth": 1.26,
+        "step_value": 0.10,
+        "min_level": 3,
+    },
+    {
+        "code": "project_insurance",
+        "name": "🧯 Страховка проекта",
+        "type": "event_shield",
+        "base_cost": 900,
+        "growth": 1.28,
+        "step_value": 1,
+        "min_level": 3,
+    },
+    {
+        "code": "process_optimization",
+        "name": "🎛️ Оптимизация процессов",
+        "type": "passive",
+        "base_cost": 760,
+        "growth": 1.27,
+        "step_value": 0.06,
+        "min_level": 3,
+    },
+    {
+        "code": "combo_click",
+        "name": "🔗 Комбо-клик",
+        "type": "combo",
+        "base_cost": 820,
+        "growth": 1.25,
+        "step_value": 0.2,
+        "min_level": 3,
+    },
+    {
+        "code": "team_synergy",
+        "name": "👥 Слаженная команда",
+        "type": "team_income",
+        "base_cost": 860,
+        "growth": 1.28,
+        "step_value": 0.07,
+        "min_level": 3,
+    },
+    {
+        "code": "ergonomics",
+        "name": "🪑 Эргономика",
+        "type": "ratelimit",
+        "base_cost": 900,
+        "growth": 1.30,
+        "step_value": 1,
+        "min_level": 3,
+    },
+    {
+        "code": "requirement_relief",
+        "name": "🧭 Снижение требований",
+        "type": "req_clicks",
+        "base_cost": 980,
+        "growth": 1.35,
+        "step_value": 0.03,
+        "min_level": 5,
+    },
+    {
+        "code": "quick_briefs",
+        "name": "📦 Быстрые брифы",
+        "type": "free_order",
+        "base_cost": 1040,
+        "growth": 1.28,
+        "step_value": 0.03,
+        "min_level": 5,
+    },
+    {
+        "code": "contractor_discount",
+        "name": "🧾 Скидки подрядчикам",
+        "type": "team_discount",
+        "base_cost": 1080,
+        "growth": 1.30,
+        "step_value": 0.05,
+        "min_level": 5,
+    },
+    {
+        "code": "deep_offline",
+        "name": "💤 Глубокий офлайн",
+        "type": "offline_cap",
+        "base_cost": 1140,
+        "growth": 1.32,
+        "step_value": 7200,
+        "min_level": 5,
+    },
+    {
+        "code": "tight_deadlines",
+        "name": "⏱️ Сжатые дедлайны",
+        "type": "rush_reward",
+        "base_cost": 1200,
+        "growth": 1.30,
+        "step_value": 0.05,
+        "min_level": 5,
+    },
+    {
+        "code": "gear_tuning",
+        "name": "🧰 Тюнинг экипировки",
+        "type": "equipment_eff",
+        "base_cost": 1280,
+        "growth": 1.35,
+        "step_value": 0.05,
+        "min_level": 5,
+    },
+    {
+        "code": "night_flow",
+        "name": "🌙 Ночной поток",
+        "type": "night_passive",
+        "base_cost": 1360,
+        "growth": 1.33,
+        "step_value": 0.12,
+        "min_level": 5,
+    },
+    {
+        "code": "shop_wholesale",
+        "name": "🛍️ Опт в магазине",
+        "type": "shop_discount",
+        "base_cost": 1420,
+        "growth": 1.33,
+        "step_value": 0.04,
+        "min_level": 5,
+    },
+    {
+        "code": "premium_projects",
+        "name": "🎯 Премиум-проекты",
+        "type": "high_order_reward",
+        "base_cost": 1500,
+        "growth": 1.34,
+        "step_value": 0.08,
+        "min_level": 5,
+    },
 ]
 
 BOOST_EXTRA_META: Dict[str, Dict[str, Any]] = {
@@ -1531,10 +1707,11 @@ async def seed_if_needed(session: AsyncSession) -> None:
             )
     # Бусты
     existing_boosts = {
-        code: bid for code, bid in (await session.execute(select(Boost.code, Boost.id))).all()
+        boost.code: boost for boost in (await session.execute(select(Boost))).scalars()
     }
     for d in SEED_BOOSTS:
-        if d["code"] not in existing_boosts:
+        boost = existing_boosts.get(d["code"])
+        if not boost:
             session.add(
                 Boost(
                     code=d["code"],
@@ -1543,8 +1720,11 @@ async def seed_if_needed(session: AsyncSession) -> None:
                     base_cost=d["base_cost"],
                     growth=d["growth"],
                     step_value=d["step_value"],
+                    min_level=d.get("min_level", 1),
                 )
             )
+        else:
+            boost.min_level = d.get("min_level", boost.min_level or 1)
     # Команда
     team_existing = {
         code: member
@@ -3995,10 +4175,25 @@ async def shop_root(message: Message, state: FSMContext):
 
 
 BOOST_TYPE_META: Dict[str, Tuple[str, str, str]] = {
-    "cp": ("⚡️", "Клик", "за нажатие"),
+    "cp": ("⚡️", "Клик", "к силе клика"),
     "reward": ("🎯", "Награда", "к наградам"),
     "passive": ("💼", "Пассивный доход", "к пассивному доходу"),
-    "event_shield": ("🧯", "Страховка", "зарядов"),
+    "xp": ("🧠", "Опыт", "к опыту"),
+    "crit": ("💥", "Крит-удар", "к шансу крита"),
+    "event_protection": ("🧿", "Антибрак", "к штрафам"),
+    "event_shield": ("🧯", "Страховка", "зарядов защиты"),
+    "combo": ("🔗", "Комбо-клик", "к мультипликатору"),
+    "ratelimit": ("🪑", "Эргономика", "к лимиту кликов"),
+    "req_clicks": ("🧭", "Снижение требований", "к требуемым кликам"),
+    "free_order": ("📦", "Быстрые брифы", "к стартовому прогрессу"),
+    "team_discount": ("🧾", "Скидки подрядчикам", "к скидке команды"),
+    "offline_cap": ("💤", "Глубокий офлайн", "к лимиту офлайн-дохода"),
+    "shop_discount": ("🛍️", "Опт в магазине", "к скидке магазина"),
+    "team_income": ("👥", "Слаженная команда", "к доходу команды"),
+    "rush_reward": ("⏱️", "Сжатые дедлайны", "к награде за скорость"),
+    "equipment_eff": ("🧰", "Тюнинг экипировки", "к бонусу экипировки"),
+    "night_passive": ("🌙", "Ночной поток", "к ночному пассиву"),
+    "high_order_reward": ("🎯", "Премиум-проекты", "к наградам крупных заказов"),
 }
 
 ITEM_BONUS_LABELS: Dict[str, str] = {
@@ -4019,43 +4214,83 @@ ITEM_SLOT_EMOJI: Dict[str, str] = {
     "charm": "📜",
 }
 
+ITEM_SLOT_LABELS: Dict[str, str] = {
+    "chair": "Стул",
+    "laptop": "Ноутбук",
+    "monitor": "Монитор",
+    "phone": "Смартфон",
+    "tablet": "Планшет",
+    "charm": "Талисман",
+}
 
-def _boost_display(boost: Boost) -> Tuple[str, str, str]:
-    """Return icon, label and effect description for a boost."""
 
-    icon, label, suffix = BOOST_TYPE_META.get(
+def _boost_meta(boost: Boost) -> Tuple[str, str, str]:
+    """Return base icon, label and suffix for the boost."""
+
+    icon, short_label, suffix = BOOST_TYPE_META.get(
         boost.type, ("✨", boost.name, "к характеристике")
     )
-    step = boost.step_value
+    label = short_label or boost.name
+    if label == boost.name and label.startswith(icon):
+        label = label[len(icon) :].strip()
+    label = label or boost.name
+    return icon, label, suffix
+
+
+def _format_boost_effect_value(boost: Boost, value: float, suffix: str) -> str:
+    """Format boost value according to its type for human readable output."""
+
     if boost.type == "cp":
-        effect = f"+{int(round(step))} {suffix}"
-    elif boost.type in {"reward", "passive", "xp", "team_income", "rush_reward", "equipment_eff", "night_passive", "high_order_reward"}:
-        effect = f"+{int(round(step * 100))}% {suffix}"
-    elif boost.type == "crit":
+        return f"+{int(round(value))} {suffix}"
+    if boost.type in {
+        "reward",
+        "passive",
+        "xp",
+        "team_income",
+        "rush_reward",
+        "equipment_eff",
+        "night_passive",
+        "high_order_reward",
+    }:
+        return f"+{int(round(value * 100))}% {suffix}"
+    if boost.type == "crit":
         extra = BOOST_EXTRA_META.get(boost.code, {})
         multiplier = extra.get("crit_multiplier", 1.5)
-        effect = f"+{int(round(step * 100))}% шанс, ×{format_stat(multiplier)} крит"
-    elif boost.type == "event_protection":
-        effect = f"−{int(round(step * 100))}% к негативу"
-    elif boost.type == "event_shield":
-        effect = f"+{int(round(step))} зарядов"
-    elif boost.type == "combo":
-        effect = f"+{format_stat(step)} {suffix}"
-    elif boost.type == "ratelimit":
-        effect = f"+{int(round(step))} {suffix}"
-    elif boost.type == "req_clicks":
-        effect = f"−{int(round(step * 100))}% {suffix}"
-    elif boost.type == "free_order":
-        effect = f"+{int(round(step * 100))}% {suffix}"
-    elif boost.type == "team_discount":
-        effect = f"−{int(round(step * 100))}% {suffix}"
-    elif boost.type == "offline_cap":
-        hours = step / 3600.0
-        effect = f"+{format_stat(hours)} ч {suffix}"
-    elif boost.type == "shop_discount":
-        effect = f"−{int(round(step * 100))}% {suffix}"
-    else:
-        effect = f"+{format_stat(step)} {suffix}"
+        return f"+{int(round(value * 100))}% шанс, ×{format_stat(multiplier)} крит"
+    if boost.type == "event_protection":
+        return f"−{int(round(value * 100))}% {suffix}"
+    if boost.type == "event_shield":
+        return f"+{int(round(value))} {suffix}"
+    if boost.type == "combo":
+        return f"+{format_stat(value)} {suffix}"
+    if boost.type == "ratelimit":
+        return f"+{int(round(value))} {suffix}"
+    if boost.type == "req_clicks":
+        return f"−{int(round(value * 100))}% {suffix}"
+    if boost.type == "free_order":
+        return f"+{int(round(value * 100))}% {suffix}"
+    if boost.type == "team_discount":
+        return f"−{int(round(value * 100))}% {suffix}"
+    if boost.type == "offline_cap":
+        hours = value / 3600.0
+        return f"+{format_stat(hours)} ч {suffix}"
+    if boost.type == "shop_discount":
+        return f"−{int(round(value * 100))}% {suffix}"
+    return f"+{format_stat(value)} {suffix}"
+
+
+def _boost_effect_for_level(boost: Boost, level: int) -> str:
+    """Return formatted cumulative bonus for the given boost level."""
+
+    _, _, suffix = _boost_meta(boost)
+    return _format_boost_effect_value(boost, boost.step_value * level, suffix)
+
+
+def _boost_display(boost: Boost) -> Tuple[str, str, str]:
+    """Return icon, label and single-level effect description for a boost."""
+
+    icon, label, suffix = _boost_meta(boost)
+    effect = _format_boost_effect_value(boost, boost.step_value, suffix)
     return icon, label or boost.name, effect
 
 
@@ -4077,24 +4312,45 @@ def _item_icon(item: Item) -> str:
 
 
 def fmt_boosts(
-    user: User, boosts: List[Boost], levels: Dict[int, int], page: int, page_size: int = 5
-) -> str:
-    """Compose a formatted boost list with balance and pricing."""
+    user: User,
+    boosts: List[Boost],
+    levels: Dict[int, int],
+    page: int,
+    page_size: int = 5,
+) -> Tuple[str, List[int]]:
+    """Compose a formatted boost list and return text along with selectable boost ids."""
 
     lines = [f"💰 Ваш баланс: {format_price(user.balance)}", ""]
     if not boosts:
         lines.append("Пока нечего прокачать — возвращайтесь позже.")
-        return "\n".join(lines)
+        return "\n".join(lines), []
 
-    start_index = page * page_size
-    for offset, boost in enumerate(boosts, 1):
-        icon, label, effect = _boost_display(boost)
-        lvl_next = levels.get(boost.id, 0) + 1
-        cost = format_price(upgrade_cost(boost.base_cost, boost.growth, lvl_next))
+    selectable: List[int] = []
+    number = 0
+    for boost in boosts:
+        icon, label, _ = _boost_display(boost)
+        current_level = levels.get(boost.id, 0)
+        next_level = current_level + 1
+        min_level = getattr(boost, "min_level", 1) or 1
+        if user.level < min_level:
+            per_level = _boost_effect_for_level(boost, 1)
+            lines.append(
+                f"🔒 {icon} {label} (доступно с {min_level} уровня) — {per_level} за уровень · постоянный эффект"
+            )
+            continue
+        number += 1
+        cost = format_price(upgrade_cost(boost.base_cost, boost.growth, next_level))
+        if current_level > 0:
+            current_bonus = _boost_effect_for_level(boost, current_level)
+            current_part = f"ур. {current_level}, бонус {current_bonus}"
+        else:
+            current_part = "ур. 0, бонус пока отсутствует"
+        next_bonus = _boost_effect_for_level(boost, next_level)
         lines.append(
-            f"{start_index + offset}. {icon} {label} — {effect} · ур.→{lvl_next} · {cost}"
+            f"{number}. {icon} {label} ({current_part}) → ур. {next_level} ({next_bonus}) · {cost} · постоянный эффект"
         )
-    return "\n".join(lines)
+        selectable.append(boost.id)
+    return "\n".join(lines), selectable
 
 
 def format_boost_purchase_prompt(
@@ -4102,13 +4358,21 @@ def format_boost_purchase_prompt(
 ) -> str:
     """Pretty confirmation text for a boost upgrade purchase."""
 
-    icon, label, effect = _boost_display(boost)
+    icon, label, _ = _boost_display(boost)
+    step_effect = _boost_effect_for_level(boost, 1)
+    if current_level > 0:
+        current_effect = _boost_effect_for_level(boost, current_level)
+        current_line = f"Текущий уровень: {current_level} — {current_effect}"
+    else:
+        current_line = "Текущий уровень: 0 — бонус пока отсутствует"
+    next_effect = _boost_effect_for_level(boost, next_level)
     return (
         f"{icon} Улучшение «{label}»\n"
-        f"Текущий уровень: {current_level}\n"
-        f"После покупки: {next_level}\n"
-        f"Эффект уровня: {effect}\n"
-        f"Стоимость: {format_price(cost)}"
+        f"{current_line}\n"
+        f"После покупки: {next_level} — {next_effect}\n"
+        f"Бонус за уровень: {step_effect}\n"
+        f"Стоимость: {format_price(cost)}\n"
+        "Эффект действует постоянно."
     )
 
 
@@ -4124,14 +4388,26 @@ def format_item_purchase_prompt(item: Item, price: int) -> str:
     )
 
 
-def format_item_equip_prompt(item: Item) -> str:
+def format_item_equip_prompt(item: Item, current_equipped: Optional[Item] = None) -> str:
     """Confirmation prompt shown when the user equips an owned item."""
 
     icon = _item_icon(item)
     effect = _format_item_effect(item)
+    slot_icon = ITEM_SLOT_EMOJI.get(item.slot, "🎁")
+    slot_label = ITEM_SLOT_LABELS.get(item.slot, "Слот")
+    if current_equipped and current_equipped.id == item.id:
+        slot_line = f"Этот предмет уже экипирован в слот {slot_icon} {slot_label}."
+    elif current_equipped:
+        slot_line = (
+            f"Этот предмет займёт слот {slot_icon} {slot_label} вместо «{current_equipped.name}»."
+        )
+    else:
+        slot_line = f"Этот предмет займёт слот {slot_icon} {slot_label}."
     return (
         f"{icon} Экипировать «{item.name}»?\n"
-        f"Эффект: {effect}"
+        f"Эффект: {effect}\n"
+        f"{slot_line}\n"
+        "Бонус будет активен постоянно."
     )
 
 
@@ -4156,11 +4432,12 @@ async def render_boosts(message: Message, state: FSMContext):
         }
         page = int((await state.get_data()).get("page", 0))
         sub, has_prev, has_next = slice_page(boosts, page, 5)
+        text, selectable = fmt_boosts(user, sub, levels, page)
         await message.answer(
-            fmt_boosts(user, sub, levels, page),
+            text,
             reply_markup=kb_numeric_page(has_prev, has_next),
         )
-        await state.update_data(boost_ids=[b.id for b in sub], page=page)
+        await state.update_data(boost_ids=selectable, page=page)
         await notify_new_achievements(message, achievements)
 
 
@@ -4188,6 +4465,11 @@ async def shop_choose_boost(message: Message, state: FSMContext):
         boost = await session.scalar(select(Boost).where(Boost.id == bid))
         if not boost:
             await message.answer("Буст не найден.")
+            await render_boosts(message, state)
+            return
+        min_level = getattr(boost, "min_level", 1) or 1
+        if user.level < min_level:
+            await message.answer(RU.BOOST_LOCKED.format(lvl=min_level))
             await render_boosts(message, state)
             return
         user_boost = await session.scalar(
@@ -4296,6 +4578,7 @@ def fmt_items(
     *,
     include_price: bool = True,
     discount_pct: float = 0.0,
+    equipped_ids: Optional[Set[int]] = None,
 ) -> str:
     """Format equipment listings with balance, icons and effects."""
 
@@ -4313,6 +4596,8 @@ def fmt_items(
         icon = _item_icon(it)
         effect = _format_item_effect(it)
         entry = f"{start_index + offset}. {icon} {it.name} — {effect}"
+        if equipped_ids and it.id in equipped_ids:
+            entry = f"{entry} (экипирован)"
         if include_price:
             price = it.price
             if discount_pct > 0:
@@ -4668,10 +4953,18 @@ async def team_upgrade_cancel(message: Message, state: FSMContext):
 
 # --- Гардероб ---
 
-def fmt_inventory(user: User, items: List[Item], page: int) -> str:
+def fmt_inventory(
+    user: User, items: List[Item], page: int, equipped_ids: Optional[Set[int]] = None
+) -> str:
     """Render wardrobe entries with the same visual style as the shop."""
 
-    text = fmt_items(user, items, page, include_price=False)
+    text = fmt_items(
+        user,
+        items,
+        page,
+        include_price=False,
+        equipped_ids=equipped_ids,
+    )
     if "Пока ничего нет" in text:
         return text.replace("Пока ничего нет", "Гардероб пуст — загляните в магазин.")
     return text
@@ -4693,10 +4986,19 @@ async def render_inventory(message: Message, state: FSMContext):
                 .order_by(Item.slot, Item.tier)
             )
         ).scalars().all()
+        equipped_ids = {
+            row
+            for row in (
+                await session.execute(
+                    select(UserEquipment.item_id).where(UserEquipment.user_id == user.id)
+                )
+            ).scalars()
+            if row
+        }
         page = int((await state.get_data()).get("page", 0))
         sub, has_prev, has_next = slice_page(items, page, 5)
         await message.answer(
-            fmt_inventory(user, sub, page),
+            fmt_inventory(user, sub, page, equipped_ids),
             reply_markup=kb_numeric_page(has_prev, has_next),
         )
         await state.update_data(inv_ids=[it.id for it in sub], page=page)
@@ -4729,7 +5031,13 @@ async def wardrobe_choose(message: Message, state: FSMContext):
             await message.answer("Предмет не найден.")
             await render_inventory(message, state)
             return
-        prompt = format_item_equip_prompt(it)
+        equipped_item: Optional[Item] = None
+        current_eq = await session.scalar(
+            select(UserEquipment).where(UserEquipment.user_id == user.id, UserEquipment.slot == it.slot)
+        )
+        if current_eq:
+            equipped_item = await session.scalar(select(Item).where(Item.id == current_eq.item_id))
+        prompt = format_item_equip_prompt(it, equipped_item)
         await message.answer(prompt, reply_markup=kb_confirm(RU.BTN_EQUIP))
     await state.set_state(WardrobeState.equip_confirm)
     await state.update_data(item_id=item_id)
