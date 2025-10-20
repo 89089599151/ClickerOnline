@@ -5,6 +5,8 @@ Designer Clicker Bot — single-file edition (patched)
 Полностью рабочий Telegram-кликер «Дизайнер» в одном файле.
 Технологии: Python 3.11+ (совместимо с 3.12), aiogram 3.x, SQLAlchemy 2.x (async), SQLite (aiosqlite).
 
+# Changelog: Trend, Shield, Event %, Prestige formula, New content, Unlock hints, Anti-spam
+
 Как запустить:
 1) Установите зависимости:
    pip install aiogram SQLAlchemy[asyncio] aiosqlite pydantic python-dotenv
@@ -32,7 +34,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
-from math import floor
+from math import floor, sqrt
 from typing import AsyncIterator, Deque, Dict, List, Literal, Optional, Set, Tuple, Any
 
 # --- .env ---
@@ -69,6 +71,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Index,
     case,
+    and_,
     delete,
     select,
     func,
@@ -116,6 +119,9 @@ REQ_CLICKS_REDUCTION_CAP = 0.30
 SHOP_DISCOUNT_CAP = 0.20
 NEGATIVE_EVENT_REDUCTION_CAP = 0.90
 TEAM_DISCOUNT_CAP = 0.80
+TREND_DURATION_HOURS = 24  # Баланс: сократите при необходимости ускорить ротацию.
+TREND_REWARD_MUL = 2.0  # Баланс: снизьте, если доходы растут слишком быстро.
+PRESTIGE_GAIN_DIVISOR = 1_000  # Коэффициент K для формулы репутации; подберите под экономику поздней игры.
 
 
 @dataclass
@@ -255,6 +261,7 @@ class RU:
         "🏢 Репутация: {rep}\n"
         "🤝 Приглашено друзей: {referrals}"
     )
+    PROFILE_SHIELD = "🛡️ Защита: {charges}"
     TEAM_HEADER = "👥 Команда (доход/мин, уровень, цена повышения):"
     TEAM_LOCKED = "👥 Команда откроется со 2 уровня."
     SHOP_HEADER = "🛒 Магазин: выберите раздел для прокачки."
@@ -276,6 +283,7 @@ class RU:
     EVENT_NEGATIVE = "{title}"
     EVENT_BUFF = "{title}"
     EVENT_BUFF_ACTIVE = "🔔 Активен бафф: {title} (до {expires})"
+    EVENT_SHIELD_BLOCK = "🛡️ Страховка сработала. Негатив отменён."
     QUEST_LOCKED = "😈 Квесты откроются с {lvl} уровня. Продолжайте прокачку!"
     QUEST_ALREADY_DONE = "😈 Квест «{name}» уже завершён. Выберите другой вызов."
     QUEST_ALL_DONE = "😈 Вы прошли все доступные квесты! Скоро появятся новые испытания."
@@ -297,7 +305,16 @@ class RU:
         "Каждый новый дизайнер принесёт вам {rub} ₽ и {xp} XP."
     )
     SPECIAL_ORDER_TITLE = "Особый заказ"
-    SPECIAL_ORDER_HINT = "💡 Сегодня доступен особый заказ с повышенной наградой!"
+    SPECIAL_ORDER_HINT = "🔥 Сегодня трендовый заказ: {title} ×{mul}"
+    SPECIAL_ORDER_AVAILABLE = "💡 Сегодня доступен особый заказ с повышенной наградой!"
+    TREND_HINT = "🔥 Сегодня трендовый заказ: {title} ×{mul}"
+    TREND_BADGE = "🔥 тренд"
+    UNLOCK_HINT_TEAM = (
+        "👥 Доступна Команда. Наймите первого сотрудника в разделе Команда — получите пассивный доход."
+    )
+    UNLOCK_HINT_SKILLS = "🎯 Доступны Навыки. Зайдите в Профиль → Навыки."
+    UNLOCK_HINT_QUESTS = "😈 Доступны Квесты. Попробуйте «Клиент из ада»."
+    UNLOCK_HINT_STUDIO = "🏢 Доступна Студия (престиж)."
     CAMPAIGN_HEADER = "📜 Кампания «От фрилансера до студии»"
     CAMPAIGN_STATUS = "Глава {chapter}/{total}: {title}\nЦель: {goal}\nПрогресс: {progress}%"
     CAMPAIGN_DONE = "Глава выполнена! Заберите награду."
@@ -486,6 +503,19 @@ def kb_quest_options(options: List[str]) -> ReplyKeyboardMarkup:
     rows = [[opt] for opt in options]
     rows.append([RU.BTN_BACK])
     return _reply_keyboard(rows)
+
+
+def kb_event_choice(event_code: str, options: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=opt.get("text", str(idx + 1)),
+                callback_data=f"event_choice:{event_code}:{idx}",
+            )
+        ]
+        for idx, opt in enumerate(options)
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 async def build_main_menu_markup(
@@ -695,6 +725,24 @@ async def notify_level_up_message(
     reputation = prestige.reputation if prestige else 0
     rank = rank_for(user.level, reputation)
     await message.answer(RU.LEVEL_UP.format(lvl=user.level, rank=rank))
+    payload = ensure_tutorial_payload(user)
+    hints = payload.setdefault("unlock_hints", {})
+    unlock_messages: List[str] = []
+
+    def maybe_unlock(flag: str, threshold: int, text: str) -> None:
+        if prev_level < threshold <= user.level and not hints.get(flag):
+            hints[flag] = True
+            unlock_messages.append(text)
+
+    maybe_unlock("team", 2, RU.UNLOCK_HINT_TEAM)
+    maybe_unlock("skills", 5, RU.UNLOCK_HINT_SKILLS)
+    maybe_unlock("quests", 10, RU.UNLOCK_HINT_QUESTS)
+    maybe_unlock("studio", 20, RU.UNLOCK_HINT_STUDIO)
+    if unlock_messages:
+        user.tutorial_payload = payload
+        user.updated_at = utcnow()
+        for text in unlock_messages:
+            await message.answer(text)
 
 
 # ----------------------------------------------------------------------------
@@ -826,6 +874,8 @@ class UserOrder(Base):
     canceled: Mapped[bool] = mapped_column(Boolean, default=False)
     reward_snapshot_mul: Mapped[float] = mapped_column(Float, default=1.0)
     is_special: Mapped[bool] = mapped_column(Boolean, default=False)
+    trend_applied: Mapped[bool] = mapped_column(Boolean, default=False)
+    trend_multiplier: Mapped[float] = mapped_column(Float, default=1.0)
 
     user: Mapped["User"] = relationship(back_populates="orders")
     order: Mapped["Order"] = relationship()
@@ -865,6 +915,7 @@ class TeamMember(Base):
     name: Mapped[str] = mapped_column(String(100))
     base_income_per_min: Mapped[float] = mapped_column(Float)
     base_cost: Mapped[int] = mapped_column(Integer)
+    min_level: Mapped[int] = mapped_column(Integer, default=1)
 
 
 class UserTeam(Base):
@@ -961,6 +1012,7 @@ class RandomEvent(Base):
     duration_sec: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     weight: Mapped[int] = mapped_column(Integer, default=1)
     min_level: Mapped[int] = mapped_column(Integer, default=1)
+    interactive: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class UserBuff(Base):
@@ -1037,6 +1089,14 @@ class UserPrestige(Base):
     __table_args__ = (UniqueConstraint("user_id", name="uq_user_prestige"),)
 
 
+class GlobalState(Base):
+    __tablename__ = "global_state"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[dict] = mapped_column(JSON)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 # ----------------------------------------------------------------------------
 # Подключение к БД
 # ----------------------------------------------------------------------------
@@ -1110,10 +1170,34 @@ async def ensure_schema(session: AsyncSession) -> None:
     user_order_columns = await _existing_columns("user_orders")
     if "is_special" not in user_order_columns:
         await session.execute(text("ALTER TABLE user_orders ADD COLUMN is_special BOOLEAN NOT NULL DEFAULT 0"))
+    if "trend_applied" not in user_order_columns:
+        await session.execute(text("ALTER TABLE user_orders ADD COLUMN trend_applied BOOLEAN NOT NULL DEFAULT 0"))
+    if "trend_multiplier" not in user_order_columns:
+        await session.execute(text("ALTER TABLE user_orders ADD COLUMN trend_multiplier FLOAT NOT NULL DEFAULT 1.0"))
 
     item_columns = await _existing_columns("items")
     if "obtain" not in item_columns:
         await session.execute(text("ALTER TABLE items ADD COLUMN obtain TEXT"))
+
+    team_columns = await _existing_columns("team_members")
+    if "min_level" not in team_columns:
+        await session.execute(text("ALTER TABLE team_members ADD COLUMN min_level INTEGER NOT NULL DEFAULT 1"))
+
+    random_event_columns = await _existing_columns("random_events")
+    if "interactive" not in random_event_columns:
+        await session.execute(text("ALTER TABLE random_events ADD COLUMN interactive BOOLEAN NOT NULL DEFAULT 0"))
+
+    tables = {
+        row[0]
+        for row in (await session.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))).all()
+    }
+    if "global_state" not in tables:
+        await session.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS global_state ("
+                "key TEXT PRIMARY KEY, value JSON, updated_at DATETIME)"
+            )
+        )
 
 
 # ----------------------------------------------------------------------------
@@ -1127,6 +1211,12 @@ SEED_ORDERS = [
     {"title": "Лендинг (1 экран)", "base_clicks": 600, "min_level": 3},
     {"title": "Брендбук (мини)", "base_clicks": 1200, "min_level": 5},
     {"title": "Редизайн логотипа", "base_clicks": 800, "min_level": 4},
+    {"title": "UX-аудит мобильного приложения", "base_clicks": 2200, "min_level": 6},
+    {"title": "Редизайн приложения (ядро)", "base_clicks": 3000, "min_level": 8},
+    {"title": "Брендинг для корпорации", "base_clicks": 4200, "min_level": 10},
+    {"title": "Сайт компании 5 экранов", "base_clicks": 5500, "min_level": 12},
+    {"title": "Международная кампания бренда", "base_clicks": 8000, "min_level": 15},
+    {"title": "Глобальный ребрендинг", "base_clicks": 12000, "min_level": 18},
     {
         "title": "Особый заказ: Айдентика фестиваля",
         "base_clicks": 1800,
@@ -1143,6 +1233,7 @@ SEED_BOOSTS = [
     {"code": "accelerated_learning", "name": "🧠 Ускоренное обучение", "type": "xp", "base_cost": 560, "growth": 1.22, "step_value": 0.08},
     {"code": "critical_strike", "name": "💥 Крит-удар", "type": "crit", "base_cost": 700, "growth": 1.28, "step_value": 0.02},
     {"code": "anti_brak", "name": "🧿 Антибрак", "type": "event_protection", "base_cost": 740, "growth": 1.26, "step_value": 0.10},
+    {"code": "project_insurance", "name": "🧯 Страховка проекта", "type": "event_shield", "base_cost": 900, "growth": 1.28, "step_value": 1},
     {"code": "process_optimization", "name": "🎛️ Оптимизация процессов", "type": "passive", "base_cost": 760, "growth": 1.27, "step_value": 0.06},
     {"code": "combo_click", "name": "🔗 Комбо-клик", "type": "combo", "base_cost": 820, "growth": 1.25, "step_value": 0.2},
     {"code": "team_synergy", "name": "👥 Слаженная команда", "type": "team_income", "base_cost": 860, "growth": 1.28, "step_value": 0.07},
@@ -1164,10 +1255,11 @@ BOOST_EXTRA_META: Dict[str, Dict[str, Any]] = {
 }
 
 SEED_TEAM = [
-    {"code": "junior", "name": "Junior Designer", "base_income_per_min": 4, "base_cost": 100},
-    {"code": "middle", "name": "Middle Designer", "base_income_per_min": 10, "base_cost": 300},
-    {"code": "senior", "name": "Senior Designer", "base_income_per_min": 22, "base_cost": 800},
-    {"code": "pm", "name": "Project Manager", "base_income_per_min": 35, "base_cost": 1200},
+    {"code": "junior", "name": "Junior Designer", "base_income_per_min": 4, "base_cost": 100, "min_level": 2},
+    {"code": "middle", "name": "Middle Designer", "base_income_per_min": 10, "base_cost": 300, "min_level": 3},
+    {"code": "senior", "name": "Senior Designer", "base_income_per_min": 22, "base_cost": 800, "min_level": 4},
+    {"code": "pm", "name": "Project Manager", "base_income_per_min": 35, "base_cost": 1200, "min_level": 5},
+    {"code": "director", "name": "Creative Director", "base_income_per_min": 60, "base_cost": 2500, "min_level": 12},
 ]
 
 SEED_ITEMS = [
@@ -1204,6 +1296,16 @@ SEED_ITEMS = [
         "obtain": "achievement",
     },
     {
+        "code": "poster_art",
+        "name": "Арт-постер вдохновения",
+        "slot": "charm",
+        "tier": 2,
+        "bonus_type": "reward_pct",
+        "bonus_value": 0.03,
+        "price": 900,
+        "min_level": 8,
+    },
+    {
         "code": "art_director_trophy",
         "name": "Трофей арт-директора",
         "slot": "charm",
@@ -1213,6 +1315,16 @@ SEED_ITEMS = [
         "price": 0,
         "min_level": 5,
         "obtain": "quest",
+    },
+    {
+        "code": "desk_printer",
+        "name": "Командный принтер",
+        "slot": "charm",
+        "tier": 3,
+        "bonus_type": "passive_pct",
+        "bonus_value": 0.05,
+        "price": 1500,
+        "min_level": 12,
     },
 ]
 
@@ -1232,6 +1344,7 @@ SEED_ACHIEVEMENTS = [
 SEED_RANDOM_EVENTS = [
     {"code": "idea_spark", "title": "💡 Озарение! Клиент в восторге — +200₽.", "kind": "bonus", "amount": 200, "duration_sec": None, "weight": 5, "min_level": 1},
     {"code": "coffee_spill", "title": "☕ Кот пролил кофе на ноут — −150₽. Ну бывает…", "kind": "penalty", "amount": 150, "duration_sec": None, "weight": 4, "min_level": 1},
+    {"code": "spill_choice", "title": "☕ Кофе пролился — что делать?", "kind": "penalty", "amount": 0, "duration_sec": None, "weight": 1, "min_level": 1, "interactive": True},
     {"code": "viral_post", "title": "📈 Вирусный пост! +10% к наградам на 10 мин.", "kind": "buff", "amount": 0.10, "duration_sec": 600, "weight": 3, "min_level": 3},
     {"code": "client_tip", "title": "🧾 Клиент оставил чаевые — +350₽.", "kind": "bonus", "amount": 350, "duration_sec": None, "weight": 2, "min_level": 2},
     {"code": "deadline_crunch", "title": "🔥 Горящий дедлайн! −10% к наградам на 5 мин.", "kind": "buff", "amount": -0.10, "duration_sec": 300, "weight": 2, "min_level": 4},
@@ -1243,14 +1356,20 @@ SEED_RANDOM_EVENTS = [
 
 RANDOM_EVENT_EFFECTS = {
     "idea_spark": {"balance": 200},
-    "coffee_spill": {"balance": -150},
+    "coffee_spill": {"balance_pct": -0.05, "balance": -150},
     "viral_post": {"buff": {"reward_pct": 0.10}},
     "client_tip": {"balance": 350},
     "deadline_crunch": {"buff": {"reward_pct": -0.10}},
     "agency_feature": {"buff": {"passive_pct": 0.05}},
-    "software_crash": {"xp": -100},
+    "software_crash": {"xp_pct": -0.10, "xp": -100},
     "mentor_call": {"xp": 150},
     "perfect_flow": {"buff": {"cp_pct": 0.15}},
+    "spill_choice": {
+        "interactive": [
+            {"text": "−150 ₽", "effect": {"balance_pct": -0.05, "balance": -150}},
+            {"text": "−50 XP", "effect": {"xp_pct": -0.05, "xp": -50}},
+        ]
+    },
 }
 
 SEED_SKILLS = [
@@ -1396,9 +1515,12 @@ QUEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
 async def seed_if_needed(session: AsyncSession) -> None:
     """Идемпотентная загрузка сидов при первом старте."""
     # Заказы
-    cnt = (await session.execute(select(func.count()).select_from(Order))).scalar_one()
-    if cnt == 0:
-        for d in SEED_ORDERS:
+    existing_orders = {
+        title: oid
+        for title, oid in (await session.execute(select(Order.title, Order.id))).all()
+    }
+    for d in SEED_ORDERS:
+        if d["title"] not in existing_orders:
             session.add(
                 Order(
                     title=d["title"],
@@ -1408,21 +1530,48 @@ async def seed_if_needed(session: AsyncSession) -> None:
                 )
             )
     # Бусты
-    cnt = (await session.execute(select(func.count()).select_from(Boost))).scalar_one()
-    if cnt == 0:
-        for d in SEED_BOOSTS:
-            session.add(Boost(code=d["code"], name=d["name"], type=d["type"],
-                              base_cost=d["base_cost"], growth=d["growth"], step_value=d["step_value"]))
+    existing_boosts = {
+        code: bid for code, bid in (await session.execute(select(Boost.code, Boost.id))).all()
+    }
+    for d in SEED_BOOSTS:
+        if d["code"] not in existing_boosts:
+            session.add(
+                Boost(
+                    code=d["code"],
+                    name=d["name"],
+                    type=d["type"],
+                    base_cost=d["base_cost"],
+                    growth=d["growth"],
+                    step_value=d["step_value"],
+                )
+            )
     # Команда
-    cnt = (await session.execute(select(func.count()).select_from(TeamMember))).scalar_one()
-    if cnt == 0:
-        for d in SEED_TEAM:
-            session.add(TeamMember(code=d["code"], name=d["name"],
-                                   base_income_per_min=d["base_income_per_min"], base_cost=d["base_cost"]))
+    team_existing = {
+        code: member
+        for member, code in (
+            await session.execute(select(TeamMember, TeamMember.code))
+        ).all()
+    }
+    for d in SEED_TEAM:
+        member = team_existing.get(d["code"])
+        if not member:
+            session.add(
+                TeamMember(
+                    code=d["code"],
+                    name=d["name"],
+                    base_income_per_min=d["base_income_per_min"],
+                    base_cost=d["base_cost"],
+                    min_level=d.get("min_level", 1),
+                )
+            )
+        else:
+            member.min_level = d.get("min_level", member.min_level)
     # Предметы
-    cnt = (await session.execute(select(func.count()).select_from(Item))).scalar_one()
-    if cnt == 0:
-        for d in SEED_ITEMS:
+    existing_items = {
+        code: iid for code, iid in (await session.execute(select(Item.code, Item.id))).all()
+    }
+    for d in SEED_ITEMS:
+        if d["code"] not in existing_items:
             session.add(
                 Item(
                     code=d["code"],
@@ -1451,9 +1600,15 @@ async def seed_if_needed(session: AsyncSession) -> None:
                 )
             )
     # Случайные события
-    cnt = (await session.execute(select(func.count()).select_from(RandomEvent))).scalar_one()
-    if cnt == 0:
-        for d in SEED_RANDOM_EVENTS:
+    existing_events = {
+        code: event
+        for event, code in (
+            await session.execute(select(RandomEvent, RandomEvent.code))
+        ).all()
+    }
+    for d in SEED_RANDOM_EVENTS:
+        event = existing_events.get(d["code"])
+        if not event:
             session.add(
                 RandomEvent(
                     code=d["code"],
@@ -1463,8 +1618,12 @@ async def seed_if_needed(session: AsyncSession) -> None:
                     duration_sec=d["duration_sec"],
                     weight=d["weight"],
                     min_level=d["min_level"],
+                    interactive=bool(d.get("interactive", False)),
                 )
             )
+        else:
+            if event.interactive != bool(d.get("interactive", False)):
+                event.interactive = bool(d.get("interactive", False))
     # Навыки
     cnt = (await session.execute(select(func.count()).select_from(Skill))).scalar_one()
     if cnt == 0:
@@ -1486,6 +1645,85 @@ async def seed_if_needed(session: AsyncSession) -> None:
     )
 
 
+TREND_STATE_KEY = "trend_order"
+
+
+async def set_trend(
+    session: AsyncSession,
+    order_id: int,
+    valid_until: datetime,
+    reward_mul: float = TREND_REWARD_MUL,
+) -> None:
+    state = await session.scalar(select(GlobalState).where(GlobalState.key == TREND_STATE_KEY))
+    payload = {
+        "order_id": order_id,
+        "valid_until": valid_until.replace(microsecond=0).isoformat(),
+        "reward_mul": reward_mul,
+    }
+    now = utcnow()
+    if state:
+        state.value = payload
+        state.updated_at = now
+    else:
+        session.add(GlobalState(key=TREND_STATE_KEY, value=payload, updated_at=now))
+
+
+async def get_trend(session: AsyncSession) -> Optional[dict]:
+    state = await session.scalar(select(GlobalState).where(GlobalState.key == TREND_STATE_KEY))
+    if not state or not state.value:
+        return None
+    value = dict(state.value)
+    raw_until = value.get("valid_until")
+    try:
+        valid_until = datetime.fromisoformat(raw_until) if raw_until else None
+    except ValueError:
+        valid_until = None
+    if not valid_until or ensure_naive(valid_until) <= utcnow():
+        await session.delete(state)
+        return None
+    return {
+        "order_id": int(value.get("order_id", 0)),
+        "valid_until": ensure_naive(valid_until),
+        "reward_mul": float(value.get("reward_mul", TREND_REWARD_MUL)),
+    }
+
+
+async def roll_new_trend(
+    session: AsyncSession, user_level_hint: Optional[int] = None
+) -> dict:
+    level_cap = max(1, user_level_hint or 1)
+    orders = (
+        await session.execute(
+            select(Order)
+            .where(Order.is_special.is_(False), Order.min_level <= level_cap)
+            .order_by(Order.id)
+        )
+    ).scalars().all()
+    if not orders:
+        orders = (
+            await session.execute(select(Order).where(Order.is_special.is_(False)))
+        ).scalars().all()
+    if not orders:
+        raise RuntimeError("No orders available to roll trend")
+    current = await get_trend(session)
+    candidates = [o for o in orders if not current or o.id != current.get("order_id")]
+    if not candidates:
+        candidates = orders
+    order = random.choice(candidates)
+    valid_until = utcnow() + timedelta(hours=TREND_DURATION_HOURS)
+    reward_mul = TREND_REWARD_MUL
+    await set_trend(session, order.id, valid_until, reward_mul)
+    logger.info(
+        "Trend rolled",
+        extra={
+            "order_id": order.id,
+            "valid_until": valid_until.isoformat(),
+            "reward_mul": reward_mul,
+        },
+    )
+    return {"order_id": order.id, "valid_until": valid_until, "reward_mul": reward_mul}
+
+
 # ----------------------------------------------------------------------------
 # Экономика: формулы и сервисы
 # ----------------------------------------------------------------------------
@@ -1504,6 +1742,40 @@ def required_clicks(base_clicks: int, level: int) -> int:
 
 def base_reward_from_required(req: int, reward_mul: float = 1.0) -> int:
     return int(round(req * 0.6 * reward_mul))
+
+
+async def calc_total_earned(session: AsyncSession, user: User) -> float:
+    earning_types = {"order_finish", "quest_reward", "campaign_reward"}
+    stmt = (
+        select(
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                EconomyLog.type.in_(earning_types),
+                                EconomyLog.amount > 0,
+                            ),
+                            EconomyLog.amount,
+                        ),
+                        else_=0.0,
+                    )
+                ),
+                0.0,
+            )
+        )
+        .where(EconomyLog.user_id == user.id)
+    )
+    return float((await session.execute(stmt)).scalar_one())
+
+
+async def calc_prestige_gain(
+    session: AsyncSession, user: User, *, total_earned: Optional[float] = None
+) -> int:
+    total = total_earned if total_earned is not None else await calc_total_earned(session, user)
+    if total <= 0:
+        return 0
+    return int(floor(sqrt(total / PRESTIGE_GAIN_DIVISOR)))
 
 
 async def get_user_stats(session: AsyncSession, user: User) -> dict:
@@ -1537,6 +1809,7 @@ async def get_user_stats(session: AsyncSession, user: User) -> dict:
     negative_event_reduction = 0.0
     combo_step = 0.0
     combo_cap = 0.0
+    event_shield_charges = 0
     for code, btype, lvl, step in rows:
         if lvl <= 0 or step == 0:
             continue
@@ -1581,6 +1854,8 @@ async def get_user_stats(session: AsyncSession, user: User) -> dict:
             shop_discount_pct += value
         elif btype == "high_order_reward":
             high_order_reward_pct += value
+        elif btype == "event_shield":
+            event_shield_charges += int(lvl)
 
     equipment_multiplier = 1.0 + equipment_eff_pct
     items = (
@@ -1691,6 +1966,7 @@ async def get_user_stats(session: AsyncSession, user: User) -> dict:
         "negative_event_weight_mul": negative_event_weight_mul,
         "combo_step": max(0.0, combo_step),
         "combo_cap": max(0.0, combo_cap),
+        "event_shield_charges": max(0, event_shield_charges),
     }
 
 
@@ -1835,18 +2111,53 @@ async def add_xp_and_levelup(user: User, xp_gain: int) -> int:
     return lvl - start_level
 
 
+PENDING_EVENT_PREFIX = "pending_event_"
+EVENT_SHIELD_CODE = "project_insurance"
+
+
+async def has_pending_interactive_event(session: AsyncSession, user: User) -> bool:
+    stmt = (
+        select(func.count())
+        .select_from(UserBuff)
+        .where(
+            UserBuff.user_id == user.id,
+            UserBuff.code.like(f"{PENDING_EVENT_PREFIX}%"),
+        )
+    )
+    return (await session.execute(stmt)).scalar_one() > 0
+
+
+async def get_pending_event_buff(
+    session: AsyncSession, user: User, event_code: str
+) -> Optional[UserBuff]:
+    code = f"{PENDING_EVENT_PREFIX}{event_code}"
+    return await session.scalar(
+        select(UserBuff).where(UserBuff.user_id == user.id, UserBuff.code == code)
+    )
+
+
 def is_negative_event(event: RandomEvent) -> bool:
     """Heuristic to classify events with penalties."""
 
     effect = RANDOM_EVENT_EFFECTS.get(event.code, {})
     if not effect:
-        return False
-    if effect.get("balance", 0) < 0:
+        return event.kind == "penalty"
+    if effect.get("balance", 0) < 0 or effect.get("balance_pct", 0) < 0:
         return True
-    if effect.get("xp", 0) < 0:
+    if effect.get("xp", 0) < 0 or effect.get("xp_pct", 0) < 0:
         return True
     buff = effect.get("buff")
     if isinstance(buff, dict) and any(val < 0 for val in buff.values()):
+        return True
+    interactive = effect.get("interactive")
+    if isinstance(interactive, list):
+        for choice in interactive:
+            choice_effect = choice.get("effect", {})
+            if choice_effect.get("balance", 0) < 0 or choice_effect.get("balance_pct", 0) < 0:
+                return True
+            if choice_effect.get("xp", 0) < 0 or choice_effect.get("xp_pct", 0) < 0:
+                return True
+    if event.kind == "penalty":
         return True
     return False
 
@@ -1885,41 +2196,71 @@ async def pick_random_event(
     return events[-1]
 
 
-async def apply_random_event(session: AsyncSession, user: User, event: RandomEvent, trigger: str) -> str:
-    """Apply selected random event to the user and return announcement text."""
-
-    effect = RANDOM_EVENT_EFFECTS.get(event.code, {})
+async def apply_event_effect(
+    session: AsyncSession,
+    user: User,
+    event: RandomEvent,
+    effect: Dict[str, Any],
+    trigger: str,
+) -> str:
     now = utcnow()
     message = event.title
-    meta: Dict[str, Any] = {"event": event.code, "trigger": trigger}
+    balance_delta = 0
+    xp_delta = 0
+    meta_base: Dict[str, Any] = {"event": event.code, "trigger": trigger}
+    if "balance_pct" in effect:
+        pct = float(effect["balance_pct"])
+        delta_pct = int(floor(user.balance * pct))
+        if pct < 0 and delta_pct == 0 and user.balance > 0:
+            delta_pct = -1
+        elif pct > 0 and delta_pct == 0 and user.balance > 0:
+            delta_pct = 1
+        balance_delta += delta_pct
+        meta_base["balance_pct"] = pct
     if "balance" in effect:
-        delta = int(effect["balance"])
-        user.balance = max(0, user.balance + delta)
-        log_type = "event_bonus" if delta >= 0 else "event_penalty"
+        balance_delta += int(effect["balance"])
+    if balance_delta != 0:
+        new_balance = user.balance + balance_delta
+        if balance_delta < 0:
+            new_balance = max(0, new_balance)
+        user.balance = new_balance
+        balance_meta = {**meta_base, "balance": balance_delta}
+        log_type = "event_bonus" if balance_delta >= 0 else "event_penalty"
         session.add(
             EconomyLog(
                 user_id=user.id,
                 type=log_type,
-                amount=delta,
-                meta=meta,
+                amount=balance_delta,
+                meta=balance_meta,
                 created_at=now,
             )
         )
-    levels_gained = 0
+    if "xp_pct" in effect:
+        pct = float(effect["xp_pct"])
+        base = xp_to_level(user.level)
+        delta_pct = int(floor(base * pct))
+        if pct < 0 and delta_pct == 0 and user.xp > 0:
+            delta_pct = -1
+        elif pct > 0 and delta_pct == 0:
+            delta_pct = 1
+        xp_delta += delta_pct
+        meta_base["xp_pct"] = pct
     if "xp" in effect:
-        xp_delta = int(effect["xp"])
+        xp_delta += int(effect["xp"])
+    levels_gained = 0
+    if xp_delta != 0:
         if xp_delta >= 0:
             levels_gained = await add_xp_and_levelup(user, xp_delta)
         else:
             user.xp = max(0, user.xp + xp_delta)
-        meta["xp"] = xp_delta
+        xp_meta = {**meta_base, "xp": xp_delta}
         log_type = "event_bonus" if xp_delta >= 0 else "event_penalty"
         session.add(
             EconomyLog(
                 user_id=user.id,
                 type=log_type,
                 amount=0.0,
-                meta=meta,
+                meta=xp_meta,
                 created_at=now,
             )
         )
@@ -1941,7 +2282,7 @@ async def apply_random_event(session: AsyncSession, user: User, event: RandomEve
                 user_id=user.id,
                 type="event_buff",
                 amount=0.0,
-                meta={**meta, "buff": payload, "duration": duration},
+                meta={**meta_base, "buff": payload, "duration": duration},
                 created_at=now,
             )
         )
@@ -1951,17 +2292,59 @@ async def apply_random_event(session: AsyncSession, user: User, event: RandomEve
                 RU.EVENT_BUFF_ACTIVE.format(title=event.title, expires=expires.strftime("%H:%M")),
             ]
         )
-    elif "balance" in effect and effect["balance"] >= 0:
+    elif balance_delta > 0 or xp_delta > 0:
         message = RU.EVENT_POSITIVE.format(title=event.title)
-    elif "balance" in effect and effect["balance"] < 0:
+    elif balance_delta < 0 or xp_delta < 0:
         message = RU.EVENT_NEGATIVE.format(title=event.title)
-    elif "xp" in effect:
-        message = RU.EVENT_POSITIVE.format(title=event.title) if effect["xp"] >= 0 else RU.EVENT_NEGATIVE.format(title=event.title)
     if levels_gained > 0:
         prestige = await get_prestige_entry(session, user)
-        rank = rank_for(user.level, prestige.reputation if prestige else 0)
+        reputation = prestige.reputation if prestige else 0
+        rank = rank_for(user.level, reputation)
         message = f"{message}\n{RU.LEVEL_UP.format(lvl=user.level, rank=rank)}"
     return message
+
+
+async def apply_random_event(session: AsyncSession, user: User, event: RandomEvent, trigger: str) -> Tuple[str, Optional[InlineKeyboardMarkup]]:
+    """Apply selected random event to the user and return announcement text."""
+
+    effect = RANDOM_EVENT_EFFECTS.get(event.code, {})
+    if not effect:
+        return event.title, None
+    if is_negative_event(event):
+        shield_entry = await get_user_boost_by_code(session, user, EVENT_SHIELD_CODE)
+        if shield_entry and shield_entry.level > 0:
+            shield_entry.level -= 1
+            user.updated_at = utcnow()
+            logger.info(
+                "Event shield used",
+                extra={"tg_id": user.tg_id, "user_id": user.id, "event": event.code, "shield_left": shield_entry.level},
+            )
+            return RU.EVENT_SHIELD_BLOCK, None
+    interactive = effect.get("interactive")
+    if event.interactive and isinstance(interactive, list):
+        await session.execute(
+            delete(UserBuff).where(
+                UserBuff.user_id == user.id,
+                UserBuff.code == f"{PENDING_EVENT_PREFIX}{event.code}",
+            )
+        )
+        expires = utcnow() + timedelta(hours=12)
+        session.add(
+            UserBuff(
+                user_id=user.id,
+                code=f"{PENDING_EVENT_PREFIX}{event.code}",
+                title=event.title,
+                expires_at=expires,
+                payload={"event": event.code, "trigger": trigger, "options": interactive},
+            )
+        )
+        logger.info(
+            "Interactive event pending",
+            extra={"tg_id": user.tg_id, "user_id": user.id, "event": event.code, "options": len(interactive)},
+        )
+        return event.title, kb_event_choice(event.code, interactive)
+    message = await apply_event_effect(session, user, event, effect, trigger)
+    return message, None
 
 
 async def trigger_random_event(
@@ -1970,10 +2353,12 @@ async def trigger_random_event(
     trigger: str,
     probability: float,
     stats: Optional[Dict[str, Any]] = None,
-) -> Optional[str]:
+) -> Optional[Tuple[str, Optional[InlineKeyboardMarkup]]]:
     """Roll random event with probability and return announcement if triggered."""
 
     if random.random() > probability:
+        return None
+    if await has_pending_interactive_event(session, user):
         return None
     if stats is None:
         stats = await get_user_stats(session, user)
@@ -1990,7 +2375,7 @@ async def trigger_random_event(
 def describe_effect(effect: Dict[str, Any]) -> str:
     parts = []
     for key, value in effect.items():
-        if key in {"reward_pct", "passive_pct", "cp_pct", "req_clicks_pct", "xp_pct"}:
+        if key in {"reward_pct", "passive_pct", "cp_pct", "req_clicks_pct", "xp_pct", "balance_pct"}:
             parts.append(f"{key.replace('_', ' ')} {int(value * 100)}%")
         elif key == "cp_add":
             parts.append(f"+{int(value)} CP")
@@ -2043,6 +2428,23 @@ async def maybe_prompt_skill_choice(
             await state.update_data(skill_codes=[s.code for s in choices])
             await message.answer("\n".join(lines), reply_markup=kb_skill_choices(len(choices)))
             return
+
+
+async def maybe_send_trend_hint(message: Message, session: AsyncSession, user: User) -> None:
+    trend = await get_trend(session)
+    if not trend:
+        return
+    order = await session.scalar(select(Order).where(Order.id == trend.get("order_id")))
+    if not order:
+        return
+    payload = ensure_tutorial_payload(user)
+    today_key = utcnow().date().isoformat()
+    if payload.get("trend_hint_date") == today_key:
+        return
+    payload["trend_hint_date"] = today_key
+    user.updated_at = utcnow()
+    mul_text = format_stat(float(trend.get("reward_mul", TREND_REWARD_MUL)))
+    await message.answer(RU.SPECIAL_ORDER_HINT.format(title=order.title, mul=mul_text))
 
 
 def get_campaign_definition(chapter: int) -> Optional[dict]:
@@ -2351,7 +2753,9 @@ async def get_prestige_entry(session: AsyncSession, user: User) -> UserPrestige:
     return prestige
 
 
-async def perform_prestige_reset(session: AsyncSession, user: User, gain: int) -> None:
+async def perform_prestige_reset(
+    session: AsyncSession, user: User, gain: int, total_earned: float
+) -> None:
     prestige = await get_prestige_entry(session, user)
     now = utcnow()
     prestige.reputation += max(0, gain)
@@ -2362,9 +2766,18 @@ async def perform_prestige_reset(session: AsyncSession, user: User, gain: int) -
             user_id=user.id,
             type="prestige_reset",
             amount=0.0,
-            meta={"gain": gain},
+            meta={"gain": gain, "total_earned": round(total_earned, 2)},
             created_at=now,
         )
+    )
+    logger.info(
+        "Prestige reset",
+        extra={
+            "tg_id": user.tg_id,
+            "user_id": user.id,
+            "prestige_gain": gain,
+            "total_earned": round(total_earned, 2),
+        },
     )
     user.balance = 200
     user.cp_base = 1
@@ -2933,6 +3346,16 @@ async def get_user_by_tg(session: AsyncSession, tg_id: int) -> Optional[User]:
     return await session.scalar(select(User).where(User.tg_id == tg_id))
 
 
+async def get_user_boost_by_code(
+    session: AsyncSession, user: User, code: str
+) -> Optional[UserBoost]:
+    return await session.scalar(
+        select(UserBoost)
+        .join(Boost, Boost.id == UserBoost.boost_id)
+        .where(UserBoost.user_id == user.id, Boost.code == code)
+    )
+
+
 async def ensure_user_loaded(session: AsyncSession, message: Message) -> Optional[User]:
     """Return user for message or notify user to start the bot."""
 
@@ -2973,6 +3396,10 @@ async def cmd_start(message: Message, state: FSMContext):
         welcome,
         reply_markup=await build_main_menu_markup(tg_id=message.from_user.id),
     )
+    async with session_scope() as session:
+        user_db = await get_user_by_tg(session, message.from_user.id)
+        if user_db:
+            await maybe_send_trend_hint(message, session, user_db)
     if referral_info:
         await message.answer(
             f"🎉 За приглашение от друга получено +{REFERRAL_BONUS_RUB} ₽ и +{REFERRAL_BONUS_XP} XP!",
@@ -3031,6 +3458,60 @@ async def tutorial_skip_callback(callback: CallbackQuery, state: FSMContext):
     )
 
 
+@router.callback_query(F.data.startswith("event_choice:"))
+@safe_handler
+async def handle_event_choice_callback(callback: CallbackQuery, state: FSMContext):
+    if not callback.message:
+        await callback.answer()
+        return
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        await callback.answer("Некорректный выбор.")
+        return
+    _, event_code, idx_str = parts
+    if not idx_str.isdigit():
+        await callback.answer("Некорректный выбор.")
+        return
+    choice_idx = int(idx_str)
+    async with session_scope() as session:
+        user = await ensure_user_loaded(session, callback.message)
+        if not user:
+            await callback.answer()
+            return
+        pending = await get_pending_event_buff(session, user, event_code)
+        if not pending:
+            await callback.answer("Событие уже обработано.")
+            return
+        options = pending.payload.get("options", []) if isinstance(pending.payload, dict) else []
+        if choice_idx < 0 or choice_idx >= len(options):
+            await callback.answer("Некорректный выбор.")
+            return
+        option = options[choice_idx]
+        event = await session.scalar(select(RandomEvent).where(RandomEvent.code == event_code))
+        if not event:
+            await callback.answer("Событие не найдено.")
+            return
+        effect = option.get("effect", {})
+        text_result = await apply_event_effect(session, user, event, effect, "choice")
+        await session.delete(pending)
+        logger.info(
+            "Event choice",
+            extra={
+                "tg_id": user.tg_id,
+                "user_id": user.id,
+                "event": event_code,
+                "choice": option.get("text"),
+            },
+        )
+    await callback.answer("Выбор применён.")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    if text_result and text_result.strip():
+        await callback.message.answer(text_result)
+
+
 @router.message(F.text.in_({RU.BTN_MENU, RU.BTN_HOME}))
 @safe_handler
 async def back_to_menu(message: Message):
@@ -3041,6 +3522,7 @@ async def back_to_menu(message: Message):
             await process_offline_income(session, user, achievements)
             await notify_new_achievements(message, achievements)
             active = await get_active_order(session, user)
+            await maybe_send_trend_hint(message, session, user)
         else:
             active = None
         markup = await main_menu_for_message(message, session=session, user=user)
@@ -3096,25 +3578,40 @@ async def handle_click(message: Message, state: FSMContext):
         await daily_task_on_event(message, session, user, "daily_clicks")
         if await tutorial_on_event(message, session, user, "click"):
             await state.clear()
-        event_message: Optional[str] = None
+        event_payload: Optional[Tuple[str, Optional[InlineKeyboardMarkup]]] = None
         if user.clicks_total % RANDOM_EVENT_CLICK_INTERVAL == 0:
-            event_message = await trigger_random_event(
+            event_payload = await trigger_random_event(
                 session, user, "click", RANDOM_EVENT_CLICK_PROB, stats
             )
         prev = active.progress_clicks
         active.progress_clicks = min(active.required_clicks, active.progress_clicks + cp)
-        if (active.progress_clicks // 10) > (prev // 10) or active.progress_clicks == active.required_clicks:
+        progress_lines: List[str] = []
+        progress_markup: Optional[ReplyKeyboardMarkup] = None
+        show_progress = (active.progress_clicks // 10) > (prev // 10) or active.progress_clicks == active.required_clicks
+        extra_phrase: Optional[str] = None
+        if random.random() < 0.33:
+            extra_phrase = random.choice(CLICK_EXTRA_PHRASES)
+        if show_progress:
             pct = int(100 * active.progress_clicks / active.required_clicks)
-            await message.answer(
-                RU.CLICK_PROGRESS.format(cur=active.progress_clicks, req=active.required_clicks, pct=pct),
-                reply_markup=kb_active_order_controls(),
+            progress_lines.append(
+                RU.CLICK_PROGRESS.format(cur=active.progress_clicks, req=active.required_clicks, pct=pct)
             )
-            if random.random() < 0.33:
-                await message.answer(random.choice(CLICK_EXTRA_PHRASES))
+            progress_markup = kb_active_order_controls()
         if crit_triggered:
+            crit_line = f"💥 Критический клик! ×{format_stat(crit_multiplier)}"
+            progress_lines.append(crit_line)
+            if progress_markup is None:
+                progress_markup = kb_active_order_controls()
+        if progress_lines and extra_phrase:
+            progress_lines.append(extra_phrase)
+            extra_phrase = None
+        if progress_lines:
             await message.answer(
-                f"💥 Критический клик! ×{format_stat(crit_multiplier)}", reply_markup=kb_active_order_controls()
+                "\n".join(progress_lines),
+                reply_markup=progress_markup or kb_active_order_controls(),
             )
+        if extra_phrase:
+            await message.answer(extra_phrase)
         if active.progress_clicks >= active.required_clicks:
             order_entity = await session.scalar(select(Order).where(Order.id == active.order_id))
             reward_base = finish_order_reward(active.required_clicks, active.reward_snapshot_mul)
@@ -3148,6 +3645,9 @@ async def handle_click(message: Message, state: FSMContext):
                 reward_meta["rush_bonus"] = round(rush_bonus_pct, 4)
             if active.is_special:
                 reward_meta["special"] = True
+            if getattr(active, "trend_applied", False):
+                reward_meta["trend"] = True
+                reward_meta["trend_mul"] = round(getattr(active, "trend_multiplier", 1.0), 4)
             session.add(
                 EconomyLog(
                     user_id=user.id,
@@ -3157,21 +3657,32 @@ async def handle_click(message: Message, state: FSMContext):
                     created_at=now,
                 )
             )
-            logger.info(
-                "Order finished",
-                extra={
-                    "tg_id": user.tg_id,
-                    "user_id": user.id,
-                    "order_id": active.order_id,
-                    "reward": reward,
-                },
-            )
+            log_extra = {
+                "tg_id": user.tg_id,
+                "user_id": user.id,
+                "order_id": active.order_id,
+                "reward": reward,
+            }
+            if getattr(active, "trend_applied", False):
+                log_extra["trend_mul"] = getattr(active, "trend_multiplier", 1.0)
+            logger.info("Order finished", extra=log_extra)
             menu_markup = await main_menu_for_message(message, session=session, user=user)
             extra_line = random.choice(ORDER_DONE_EXTRA) if ORDER_DONE_EXTRA else ""
-            text_done = RU.ORDER_DONE.format(rub=reward, xp=xp_gain)
+            summary_lines = [RU.ORDER_DONE.format(rub=reward, xp=xp_gain)]
+            badges: List[str] = []
+            if getattr(active, "trend_applied", False):
+                badges.append(RU.TREND_BADGE)
+            if active.is_special:
+                badges.append("⭐ спец")
+            if rush_applied:
+                badges.append("⏱️ быстро")
+            summary_line = f"🧾 Заказов всего: {user.orders_completed}"
+            if badges:
+                summary_line = f"{summary_line} · {' '.join(badges)}"
+            summary_lines.append(summary_line)
             if extra_line:
-                text_done = f"{text_done}\n{extra_line}"
-            await message.answer(text_done, reply_markup=menu_markup)
+                summary_lines.append(extra_line)
+            await message.answer("\n".join(summary_lines), reply_markup=menu_markup)
             await update_campaign_progress(
                 session,
                 user,
@@ -3186,10 +3697,20 @@ async def handle_click(message: Message, state: FSMContext):
                 session, user, "order_finish", RANDOM_EVENT_ORDER_PROB, stats
             )
             if event_order:
-                await message.answer(event_order, reply_markup=menu_markup)
+                text_event, event_markup = event_order
+                if text_event and text_event.strip():
+                    if event_markup is not None:
+                        await message.answer(text_event, reply_markup=event_markup)
+                    else:
+                        await message.answer(text_event, reply_markup=menu_markup)
             achievements.extend(await evaluate_achievements(session, user, {"orders", "level", "balance"}))
-        if event_message and not event_message.strip() == "":
-            await message.answer(event_message, reply_markup=kb_active_order_controls())
+        if event_payload:
+            text, inline_markup = event_payload
+            if text and text.strip():
+                if inline_markup is not None:
+                    await message.answer(text, reply_markup=inline_markup)
+                else:
+                    await message.answer(text, reply_markup=kb_active_order_controls())
         await notify_new_achievements(message, achievements)
 
 
@@ -3240,12 +3761,18 @@ async def resume_order_work(message: Message):
 
 # --- Заказы ---
 
-def fmt_orders(orders: List[Order], special_hint: bool = False) -> str:
+def fmt_orders(
+    orders: List[Order],
+    special_hint: bool = False,
+    trend: Optional[Dict[str, Any]] = None,
+) -> str:
     lines = [RU.ORDERS_HEADER, "Введите номер для выбора:"]
     if special_hint:
         lines.append("")
-        lines.append(RU.SPECIAL_ORDER_HINT)
+        lines.append(RU.SPECIAL_ORDER_AVAILABLE)
     lines.append("")
+    trend_order_id = int(trend.get("order_id")) if trend else None
+    trend_mul = float(trend.get("reward_mul", TREND_REWARD_MUL)) if trend else TREND_REWARD_MUL
     for i, o in enumerate(orders, 1):
         prefix = pick_order_icon(o.title)
         title = o.title
@@ -3254,6 +3781,9 @@ def fmt_orders(orders: List[Order], special_hint: bool = False) -> str:
             prefix = "✨"
             title = f"{RU.SPECIAL_ORDER_TITLE}: {o.title}"
             suffix += " · награда ×2"
+        if trend_order_id and o.id == trend_order_id:
+            prefix = "🔥"
+            suffix += f" · награда ×{format_stat(trend_mul)}"
         lines.append(f"{circled_number(i)} {prefix} {title} — {suffix}")
     return "\n".join(lines)
 
@@ -3302,6 +3832,7 @@ async def _render_orders_page(message: Message, state: FSMContext):
         special_orders = [o for o in all_orders if o.is_special]
         regular_orders = [o for o in all_orders if not o.is_special]
         special_inserted = False
+        trend_info = await get_trend(session)
         today = utcnow().date()
         if special_orders:
             special = special_orders[0]
@@ -3317,7 +3848,7 @@ async def _render_orders_page(message: Message, state: FSMContext):
         sub, has_prev, has_next = slice_page(regular_orders, page, 5)
         hint_needed = special_inserted and any(getattr(o, "is_special", False) for o in sub)
         await message.answer(
-            fmt_orders(sub, special_hint=hint_needed),
+            fmt_orders(sub, special_hint=hint_needed, trend=trend_info),
             reply_markup=kb_numeric_page(has_prev, has_next),
         )
         await state.update_data(order_ids=[o.id for o in sub], page=page)
@@ -3403,6 +3934,13 @@ async def take_order(message: Message, state: FSMContext):
         reward_snapshot = stats["reward_mul_total"] * (
             SPECIAL_ORDER_REWARD_MUL if is_special_order else 1.0
         )
+        trend_info = await get_trend(session)
+        trend_applied = False
+        trend_multiplier = 1.0
+        if order and trend_info and order.id == trend_info.get("order_id"):
+            trend_multiplier = float(trend_info.get("reward_mul", TREND_REWARD_MUL))
+            reward_snapshot *= trend_multiplier
+            trend_applied = True
         now = utcnow()
         session.add(
             UserOrder(
@@ -3415,6 +3953,8 @@ async def take_order(message: Message, state: FSMContext):
                 canceled=False,
                 reward_snapshot_mul=reward_snapshot,
                 is_special=is_special_order,
+                trend_applied=trend_applied,
+                trend_multiplier=trend_multiplier,
             )
         )
         user.updated_at = now
@@ -3429,12 +3969,12 @@ async def take_order(message: Message, state: FSMContext):
                 )
             if is_special_order:
                 user.last_special_order_at = now
-                await message.answer(RU.SPECIAL_ORDER_HINT)
+                await message.answer(RU.SPECIAL_ORDER_AVAILABLE)
         await tutorial_on_event(message, session, user, "order_taken")
-        logger.info(
-            "Order taken",
-            extra={"tg_id": user.tg_id, "user_id": user.id, "order_id": order_id},
-        )
+        log_extra = {"tg_id": user.tg_id, "user_id": user.id, "order_id": order_id}
+        if trend_applied:
+            log_extra["trend_mul"] = trend_multiplier
+        logger.info("Order taken", extra=log_extra)
     await state.clear()
 
 
@@ -3458,6 +3998,7 @@ BOOST_TYPE_META: Dict[str, Tuple[str, str, str]] = {
     "cp": ("⚡️", "Клик", "за нажатие"),
     "reward": ("🎯", "Награда", "к наградам"),
     "passive": ("💼", "Пассивный доход", "к пассивному доходу"),
+    "event_shield": ("🧯", "Страховка", "зарядов"),
 }
 
 ITEM_BONUS_LABELS: Dict[str, str] = {
@@ -3496,6 +4037,8 @@ def _boost_display(boost: Boost) -> Tuple[str, str, str]:
         effect = f"+{int(round(step * 100))}% шанс, ×{format_stat(multiplier)} крит"
     elif boost.type == "event_protection":
         effect = f"−{int(round(step * 100))}% к негативу"
+    elif boost.type == "event_shield":
+        effect = f"+{int(round(step))} зарядов"
     elif boost.type == "combo":
         effect = f"+{format_stat(step)} {suffix}"
     elif boost.type == "ratelimit":
@@ -3957,8 +4500,7 @@ async def render_team(message: Message, state: FSMContext):
         members_all = (
             await session.execute(select(TeamMember).order_by(TeamMember.base_cost, TeamMember.id))
         ).scalars().all()
-        unlocked = max(0, min(len(members_all), user.level - 1))
-        members = members_all[:unlocked]
+        members = [m for m in members_all if user.level >= max(1, m.min_level)]
         if not members:
             await state.clear()
             await message.answer(
@@ -4025,6 +4567,10 @@ async def team_choose(message: Message, state: FSMContext):
             await message.answer("Сотрудник не найден.")
             await render_team(message, state)
             return
+        if user.level < member.min_level:
+            await message.answer("Сотрудник ещё не готов присоединиться — прокачайте уровень.")
+            await render_team(message, state)
+            return
         await message.answer(f"Повысить «{member.name}»?", reply_markup=kb_confirm(RU.BTN_UPGRADE))
     await state.set_state(TeamState.confirm)
     await state.update_data(member_id=mid)
@@ -4060,6 +4606,11 @@ async def team_upgrade(message: Message, state: FSMContext):
         member = await session.scalar(select(TeamMember).where(TeamMember.id == mid))
         if not member:
             await message.answer("Сотрудник не найден.")
+            await state.set_state(TeamState.browsing)
+            await render_team(message, state)
+            return
+        if user.level < member.min_level:
+            await message.answer("Сначала достигните нужного уровня, чтобы работать с этим специалистом.")
             await state.set_state(TeamState.browsing)
             await render_team(message, state)
             return
@@ -4324,6 +4875,9 @@ async def profile_show(message: Message, state: FSMContext):
             rep=prestige.reputation,
             referrals=user.referrals_count,
         )
+        shield_charges = stats.get("event_shield_charges", 0)
+        if shield_charges > 0:
+            text = f"{text}\n{RU.PROFILE_SHIELD.format(charges=shield_charges)}"
         await message.answer(text, reply_markup=kb_profile_menu(has_active_order=bool(active)))
         if await tutorial_on_event(message, session, user, "profile_open"):
             await state.clear()
@@ -4776,16 +5330,26 @@ async def show_studio(message: Message, state: FSMContext):
             await message.answer(RU.STUDIO_LOCKED, reply_markup=profile_markup)
             return
         prestige = await get_prestige_entry(session, user)
-        gain = max(0, user.balance // 1000)
+        total_earned = await calc_total_earned(session, user)
+        gain = await calc_prestige_gain(session, user, total_earned=total_earned)
         bonus = (prestige.reputation) * 1
         text = RU.STUDIO_INFO.format(rep=prestige.reputation, resets=prestige.resets, bonus=bonus)
         if gain > 0:
             text += "\n\n" + RU.STUDIO_CONFIRM.format(gain=gain)
             await state.set_state(StudioState.confirm)
-            await state.update_data(gain=gain)
+            await state.update_data(gain=gain, total_earned=total_earned)
             markup = kb_confirm(RU.BTN_STUDIO_CONFIRM)
         else:
             markup = profile_markup
+        logger.info(
+            "Prestige preview",
+            extra={
+                "tg_id": user.tg_id,
+                "user_id": user.id,
+                "prestige_gain": gain,
+                "total_earned": round(total_earned, 2),
+            },
+        )
         await message.answer(text, reply_markup=markup)
         await notify_new_achievements(message, achievements)
 
@@ -4795,12 +5359,15 @@ async def show_studio(message: Message, state: FSMContext):
 async def confirm_studio(message: Message, state: FSMContext):
     data = await state.get_data()
     gain = int(data.get("gain", 0))
+    stored_total = data.get("total_earned")
     async with session_scope() as session:
         user = await ensure_user_loaded(session, message)
         if not user:
             await state.clear()
             return
-        await perform_prestige_reset(session, user, gain)
+        total_earned = float(stored_total) if stored_total is not None else await calc_total_earned(session, user)
+        gain = await calc_prestige_gain(session, user, total_earned=total_earned)
+        await perform_prestige_reset(session, user, gain, total_earned)
         markup = kb_profile_menu(has_active_order=bool(await get_active_order(session, user)))
         await message.answer(RU.STUDIO_DONE.format(gain=gain), reply_markup=markup)
     await state.clear()
@@ -4814,6 +5381,101 @@ async def cancel_studio(message: Message, state: FSMContext):
         user = await get_user_by_tg(session, message.from_user.id)
         markup = await main_menu_for_message(message, session=session, user=user)
     await message.answer(RU.MENU_HINT, reply_markup=markup)
+
+
+# --- Админ-команды: тест-план ---
+
+
+def _is_base_admin(message: Message) -> bool:
+    return bool(SETTINGS.BASE_ADMIN_ID) and message.from_user and message.from_user.id == SETTINGS.BASE_ADMIN_ID
+
+
+@router.message(Command("roll_trend"))
+@safe_handler
+async def admin_roll_trend(message: Message):
+    if not _is_base_admin(message):
+        return
+    async with session_scope() as session:
+        user = await get_user_by_tg(session, message.from_user.id)
+        level_hint = user.level if user else None
+        trend = await roll_new_trend(session, user_level_hint=level_hint)
+        order = await session.scalar(select(Order).where(Order.id == trend["order_id"]))
+    title = order.title if order else f"#{trend['order_id']}"
+    expires = trend["valid_until"].strftime("%d.%m %H:%M")
+    await message.answer(
+        f"🔥 Новый тренд: {title} до {expires}, ×{format_stat(trend['reward_mul'])}"
+    )
+
+
+@router.message(Command("give_shield"))
+@safe_handler
+async def admin_give_shield(message: Message):
+    if not _is_base_admin(message):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.answer("Использование: /give_shield N")
+        return
+    amount = max(0, int(parts[1]))
+    if amount <= 0:
+        await message.answer("Укажите количество > 0.")
+        return
+    async with session_scope() as session:
+        user = await ensure_user_loaded(session, message)
+        if not user:
+            return
+        boost = await session.scalar(select(Boost).where(Boost.code == EVENT_SHIELD_CODE))
+        if not boost:
+            await message.answer("Буст страховки не найден.")
+            return
+        entry = await get_user_boost_by_code(session, user, EVENT_SHIELD_CODE)
+        if not entry:
+            entry = UserBoost(user_id=user.id, boost_id=boost.id, level=amount)
+            session.add(entry)
+        else:
+            entry.level += amount
+        user.updated_at = utcnow()
+        logger.info(
+            "Event shield granted",
+            extra={"tg_id": user.tg_id, "user_id": user.id, "amount": amount, "total": entry.level},
+        )
+        await message.answer(f"🛡️ Страховка: теперь {entry.level} заряд(ов).")
+
+
+@router.message(Command("test_event_choice"))
+@safe_handler
+async def admin_test_event_choice(message: Message):
+    if not _is_base_admin(message):
+        return
+    async with session_scope() as session:
+        user = await ensure_user_loaded(session, message)
+        if not user:
+            return
+        event = await session.scalar(select(RandomEvent).where(RandomEvent.code == "spill_choice"))
+        if not event:
+            await message.answer("Интерактивное событие не найдено.")
+            return
+        payload = await apply_random_event(session, user, event, "admin_test")
+    if payload:
+        text, markup = payload
+        if text and text.strip():
+            await message.answer(text, reply_markup=markup or kb_active_order_controls())
+
+
+@router.message(Command("prestige_preview"))
+@safe_handler
+async def admin_prestige_preview(message: Message):
+    if not _is_base_admin(message):
+        return
+    async with session_scope() as session:
+        user = await ensure_user_loaded(session, message)
+        if not user:
+            return
+        total_earned = await calc_total_earned(session, user)
+        gain = await calc_prestige_gain(session, user, total_earned=total_earned)
+    await message.answer(
+        f"📊 Всего заработано: {format_money(total_earned)} ₽ → престиж: {gain}"
+    )
 
 
 @router.message(SkillsState.picking)
