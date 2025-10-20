@@ -124,7 +124,7 @@ TREND_REWARD_MUL = 2.0  # Баланс: снизьте, если доходы р
 PRESTIGE_GAIN_DIVISOR = 1_000  # Коэффициент K для формулы репутации; подберите под экономику поздней игры.
 BOOST_COST_GROWTH = 1.6
 BOOST_CP_ADD_GROWTH = 1.45
-BOOSTS_PER_PAGE = 10
+BOOSTS_PER_PAGE = 5
 BOOST_SELECTION_INPUTS = {str(i) for i in range(1, BOOSTS_PER_PAGE + 1)}
 
 
@@ -209,8 +209,8 @@ class RU:
     # Общие
     BTN_MENU = "🏠 Меню"
     BTN_TO_MENU = "🏠 Перейти в меню"
-    BTN_PREV = "⏮️ Страница назад"
-    BTN_NEXT = "Страница вперёд ▶️"
+    BTN_PREV = "◀️ Предыдущая страница"
+    BTN_NEXT = "Следующая страница ▶️"
     BTN_TAKE = "🚀 Взять заказ"
     BTN_CANCEL = "❌ Отмена"
     BTN_CONFIRM = "✅ Подтвердить"
@@ -481,30 +481,30 @@ def kb_shop_menu() -> ReplyKeyboardMarkup:
     rows: List[List[str]] = [[RU.BTN_BOOSTS, RU.BTN_EQUIPMENT], [RU.BTN_BACK]]
     return _reply_keyboard(rows)
 
-
-def kb_boosts_controls(category: str, has_prev: bool, has_next: bool) -> ReplyKeyboardMarkup:
+def kb_boost_categories() -> ReplyKeyboardMarkup:
     rows: List[List[str]] = []
-    number_buttons = [str(i) for i in range(1, BOOSTS_PER_PAGE + 1)]
-    if number_buttons:
-        rows.append(number_buttons[: min(5, len(number_buttons))])
-        if len(number_buttons) > 5:
-            rows.append(number_buttons[5:])
-    cat_row: List[str] = []
+    current_row: List[str] = []
     for key, _meta in BOOST_CATEGORY_DEFS:
-        cat_row.append(BOOST_CATEGORY_BUTTON_TEXT[key])
-        if len(cat_row) == 2:
-            rows.append(cat_row)
-            cat_row = []
-    if cat_row:
-        rows.append(cat_row)
-    nav_row: List[str] = []
+        current_row.append(BOOST_CATEGORY_BUTTON_TEXT[key])
+        if len(current_row) == 2:
+            rows.append(current_row)
+            current_row = []
+    if current_row:
+        rows.append(current_row)
+    rows.append([RU.BTN_BACK])
+    return _reply_keyboard(rows)
+
+
+def kb_boosts_controls(has_prev: bool, has_next: bool, count: int) -> ReplyKeyboardMarkup:
+    rows: List[List[str]] = []
+    nav_row: List[str] = [RU.BTN_BACK]
     if has_prev:
         nav_row.append(RU.BTN_PREV)
     if has_next:
         nav_row.append(RU.BTN_NEXT)
-    if nav_row:
-        rows.append(nav_row)
-    rows.append([RU.BTN_BACK])
+    rows.append(nav_row)
+    if count > 0:
+        rows.append([str(i) for i in range(1, count + 1)])
     return _reply_keyboard(rows)
 
 
@@ -1274,7 +1274,7 @@ SEED_BOOSTS = [
     },
     {
         "code": "inspiration",
-        "name": "💡 Вдохновение",
+        "name": "🖱️ Первый макет",
         "type": "cp_add",
         "base_cost": 400,
         "growth": BOOST_COST_GROWTH,
@@ -1283,54 +1283,54 @@ SEED_BOOSTS = [
     },
     {
         "code": "coffee_boost",
-        "name": "☕ Кофе-брейк",
+        "name": "🧷 Пиксель-перфекционист",
         "type": "cp_add",
-        "base_cost": 550,
+        "base_cost": 800,
         "growth": BOOST_COST_GROWTH,
         "step_value": 15,
         "min_level": 2,
     },
     {
         "code": "focus_mode",
-        "name": "🎧 Фокус-плейлист",
+        "name": "💡 Идея в голове",
         "type": "cp_add",
-        "base_cost": 800,
+        "base_cost": 1500,
         "growth": BOOST_COST_GROWTH,
         "step_value": 25,
         "min_level": 3,
     },
     {
         "code": "new_device",
-        "name": "💻 Новый девайс",
+        "name": "🖌️ Божественный градиент",
         "type": "cp_add",
-        "base_cost": 1500,
+        "base_cost": 2500,
         "growth": BOOST_COST_GROWTH,
         "step_value": 50,
         "min_level": 6,
     },
     {
         "code": "creative_flow",
-        "name": "🪄 Креативный поток",
+        "name": "📐 Сетка дизайна",
         "type": "cp_add",
-        "base_cost": 4100,
+        "base_cost": 5000,
         "growth": BOOST_COST_GROWTH,
         "step_value": 120,
         "min_level": 10,
     },
     {
         "code": "design_team",
-        "name": "👥 Команда дизайнеров",
+        "name": "💻 Сеньор интерфейсов",
         "type": "cp_add",
-        "base_cost": 12500,
+        "base_cost": 10000,
         "growth": BOOST_COST_GROWTH,
         "step_value": 400,
         "min_level": 14,
     },
     {
         "code": "design_genius",
-        "name": "🚀 Гений дизайна",
+        "name": "🌈 Дизайн-гуру",
         "type": "cp_add",
-        "base_cost": 30000,
+        "base_cost": 25000,
         "growth": BOOST_COST_GROWTH,
         "step_value": 1000,
         "min_level": 16,
@@ -1355,9 +1355,9 @@ SEED_BOOSTS = [
     },
     {
         "code": "critical_strike",
-        "name": "💥 Критический макет",
+        "name": "⚔️ Крит-фидбек",
         "type": "crit",
-        "base_cost": 820,
+        "base_cost": 42000,
         "growth": BOOST_COST_GROWTH,
         "step_value": 0.03,
         "min_level": 3,
@@ -1391,9 +1391,9 @@ SEED_BOOSTS = [
     },
     {
         "code": "combo_click",
-        "name": "🔗 Комбо-поток",
+        "name": "🔗 Комбо-референсы",
         "type": "combo",
-        "base_cost": 880,
+        "base_cost": 56000,
         "growth": BOOST_COST_GROWTH,
         "step_value": 0.25,
         "min_level": 3,
@@ -1504,25 +1504,32 @@ BOOST_EXTRA_META: Dict[str, Dict[str, Any]] = {
         "flavor": "Каждый проект приносит больше — ты ловишь золотые инсайты.",
     },
     "inspiration": {
-        "flavor": "Свежие идеи приходят одна за другой — пальцы сами тянутся к мышке.",
+        "flavor": "Ты впервые открываешь Figma и кликаешь по пустому фрейму.",
+        "permanent": True,
     },
     "coffee_boost": {
-        "flavor": "Кофеин течёт в венах, продуктивность зашкаливает.",
+        "flavor": "Каждый пиксель на своём месте — клики становятся точнее.",
+        "permanent": True,
     },
     "focus_mode": {
-        "flavor": "Музыка делает работу потоком.",
+        "flavor": "Мозг вспыхивает, вдохновение усиливает твой клик.",
+        "permanent": True,
     },
     "new_device": {
-        "flavor": "Техника летает — и ты тоже.",
+        "flavor": "Градиенты текут идеально — клики обретают мощь.",
+        "permanent": True,
     },
     "creative_flow": {
-        "flavor": "Вдохновение бьёт фонтаном — каждый клик как озарение.",
+        "flavor": "Ты настраиваешь идеальную сетку, а мир подстраивается под тебя.",
+        "permanent": True,
     },
     "design_team": {
-        "flavor": "Команда творцов кликает синхронно с тобой.",
+        "flavor": "Ты кликаешь не кнопки — ты проектируешь будущее.",
+        "permanent": True,
     },
     "design_genius": {
-        "flavor": "Ты превзошёл самого себя. Каждое касание — шедевр.",
+        "flavor": "Твои клики формируют тренды, а Behance дрожит от лайков.",
+        "permanent": True,
     },
     "passive_income_plus": {
         "flavor": "Пассив капает, даже когда ты отдыхаешь.",
@@ -1532,7 +1539,8 @@ BOOST_EXTRA_META: Dict[str, Dict[str, Any]] = {
     },
     "critical_strike": {
         "crit_multiplier": 1.5,
-        "flavor": "Каждый макет может стать критом — клиенты в восторге.",
+        "flavor": "Каждый отзыв клиента усиливает тебя, а не ломает.",
+        "permanent": True,
     },
     "anti_brak": {
         "flavor": "Контроль качества как лазер — браку не пройти.",
@@ -1545,7 +1553,8 @@ BOOST_EXTRA_META: Dict[str, Dict[str, Any]] = {
     },
     "combo_click": {
         "combo_cap": 2.0,
-        "flavor": "Комбо раскачивается — держи темп и бонус растёт.",
+        "flavor": "Ты комбинируешь вдохновения как мастер коллажа.",
+        "permanent": True,
     },
     "team_synergy": {
         "flavor": "Команда дышит в унисон — прибыль множится.",
@@ -4399,9 +4408,14 @@ BOOST_CATEGORY_DEFS: List[Tuple[str, Dict[str, str]]] = [
     ("click", {"icon": "⚡", "label": "Клик"}),
     ("economy", {"icon": "💰", "label": "Экономика"}),
     ("xp", {"icon": "🧠", "label": "Опыт"}),
-    ("gear", {"icon": "🛠", "label": "Экипировка"}),
-    ("passive", {"icon": "🌙", "label": "Пассив"}),
+    ("passive", {"icon": "🌀", "label": "Пассив"}),
 ]
+BOOST_CATEGORY_DESCRIPTIONS: Dict[str, str] = {
+    "click": "усиливает силу клика и эффективность действий.",
+    "economy": "улучшает заработок и снижает расходы.",
+    "xp": "ускоряет рост уровня и навыков.",
+    "passive": "даёт долгосрочные и автоэффекты.",
+}
 BOOST_CATEGORY_META: Dict[str, Dict[str, str]] = {
     key: meta for key, meta in BOOST_CATEGORY_DEFS
 }
@@ -4417,6 +4431,7 @@ BOOST_CATEGORY_BY_TYPE: Dict[str, str] = {
     "shop_discount": "economy",
     "rush_reward": "economy",
     "high_order_reward": "economy",
+    "equipment_eff": "economy",
     "passive": "passive",
     "team_income": "passive",
     "offline_cap": "passive",
@@ -4424,8 +4439,7 @@ BOOST_CATEGORY_BY_TYPE: Dict[str, str] = {
     "event_protection": "passive",
     "event_shield": "passive",
     "xp": "xp",
-    "ratelimit": "gear",
-    "equipment_eff": "gear",
+    "ratelimit": "click",
 }
 BOOST_CATEGORY_BUTTON_TEXT: Dict[str, str] = {
     key: f"{meta['icon']} {meta['label']}" for key, meta in BOOST_CATEGORY_DEFS
@@ -4435,6 +4449,26 @@ BOOST_CATEGORY_BY_TEXT: Dict[str, str] = {
 }
 BOOST_CATEGORY_TEXTS: Set[str] = set(BOOST_CATEGORY_BY_TEXT.keys())
 BOOST_CATEGORY_DEFAULT = BOOST_CATEGORY_DEFS[0][0]
+PERMANENT_BOOST_TYPES: Set[str] = {
+    "cp",
+    "cp_add",
+    "combo",
+    "crit",
+    "ratelimit",
+    "reward",
+    "passive",
+    "xp",
+    "team_income",
+    "rush_reward",
+    "equipment_eff",
+    "night_passive",
+    "high_order_reward",
+    "req_clicks",
+    "free_order",
+    "team_discount",
+    "shop_discount",
+    "offline_cap",
+}
 
 ITEM_BONUS_LABELS: Dict[str, str] = {
     "cp_pct": "к силе клика",
@@ -4533,9 +4567,9 @@ def _boost_effect_for_level(boost: Boost, level: int) -> str:
 def _boost_display(boost: Boost) -> Tuple[str, str, str]:
     """Return icon, label and single-level effect description for a boost."""
 
-    icon, label, suffix = _boost_meta(boost)
+    icon, _, suffix = _boost_meta(boost)
     effect = _format_boost_effect_value(boost, boost.step_value, suffix)
-    return icon, label or boost.name, effect
+    return icon, boost.name, effect
 
 
 def _format_item_effect(item: Item) -> str:
@@ -4564,36 +4598,41 @@ def fmt_boosts(
 ) -> Tuple[str, List[int]]:
     """Compose a formatted boost list and return text along with selectable boost ids."""
 
-    lines = [f"💰 Ваш баланс: {format_price(user.balance)}", ""]
     if not boosts:
-        lines.append("Пока нечего прокачать — возвращайтесь позже.")
-        return "\n".join(lines), []
+        return "Пока нечего прокачать — возвращайтесь позже.", []
 
     selectable: List[int] = []
-    number = 0
-    for boost in boosts:
-        icon, label, _ = _boost_display(boost)
+    lines: List[str] = []
+    for idx, boost in enumerate(boosts, 1):
         current_level = levels.get(boost.id, 0)
         next_level = current_level + 1
         min_level = getattr(boost, "min_level", 1) or 1
-        if user.level < min_level:
-            per_level = _boost_effect_for_level(boost, 1)
-            lines.append(
-                f"🔒 {icon} {label} (доступно с {min_level} уровня) — {per_level} за уровень · постоянный эффект"
-            )
-            continue
-        number += 1
-        cost = format_price(upgrade_cost(boost.base_cost, boost.growth, next_level))
-        if current_level > 0:
-            current_bonus = _boost_effect_for_level(boost, current_level)
-            current_part = f"ур. {current_level}, бонус {current_bonus}"
-        else:
-            current_part = "ур. 0, бонус включится на 1 уровне"
         next_bonus = _boost_effect_for_level(boost, next_level)
-        lines.append(
-            f"{number}. {icon} {label} ({current_part}) → ур. {next_level} ({next_bonus}) · {cost} · постоянный эффект"
-        )
+        cost = format_price(upgrade_cost(boost.base_cost, boost.growth, next_level))
+        extra = BOOST_EXTRA_META.get(boost.code, {})
+        permanent = extra.get("permanent")
+        if permanent is None:
+            permanent = boost.type in PERMANENT_BOOST_TYPES
+        parts = [f"{idx}. {boost.name}", "—", next_bonus, "·", cost]
+        if permanent:
+            parts.append("· постоянный эффект")
+        locked = user.level < min_level
+        if locked:
+            parts.insert(1, "🔒")
+            parts.append(f"(доступно с {min_level} уровня)")
+        line = " ".join(parts)
+        lines.append(line)
+        flavor = extra.get("flavor")
+        if flavor:
+            lines.append(f"   _{flavor}_")
+        if current_level > 0 and not locked:
+            current_bonus = _boost_effect_for_level(boost, current_level)
+            lines.append(
+                f"   Текущий уровень: {current_level} — {current_bonus}"
+            )
         selectable.append(boost.id)
+        if idx != len(boosts):
+            lines.append("")
     return "\n".join(lines), selectable
 
 
@@ -4690,11 +4729,37 @@ async def render_boosts(
             ).all()
         }
         data = await state.get_data()
-        category = data.get("boost_category", BOOST_CATEGORY_DEFAULT)
+        category = data.get("boost_category")
+        if not category:
+            counts: Dict[str, int] = defaultdict(int)
+            for boost in boosts:
+                counts[_boost_category(boost)] += 1
+            lines = [
+                "🛍️ Магазин бустов — выбери направление",
+                f"💰 Баланс: {format_price(user.balance)}",
+                "",
+            ]
+            for key, meta in BOOST_CATEGORY_DEFS:
+                lines.append(
+                    f"{meta['icon']} Категория «{meta['label']}» — {counts.get(key, 0)} улучшений"
+                )
+                desc = BOOST_CATEGORY_DESCRIPTIONS.get(key)
+                if desc:
+                    lines.append(f"   {desc}")
+            lines.append("")
+            lines.append("Нажми категорию, чтобы посмотреть улучшения и открыть покупки.")
+            await message.answer("\n".join(lines), reply_markup=kb_boost_categories())
+            await state.update_data(page=0, boost_category=None, boost_ids=[])
+            await notify_new_achievements(message, achievements)
+            return
         category_boosts = [b for b in boosts if _boost_category(b) == category]
-        if not category_boosts and boosts:
-            category = BOOST_CATEGORY_DEFAULT
-            category_boosts = [b for b in boosts if _boost_category(b) == category]
+        if not category_boosts:
+            await state.update_data(boost_category=None, page=0, boost_ids=[])
+            await message.answer(
+                "В этой категории пока нет улучшений.", reply_markup=kb_boost_categories()
+            )
+            await notify_new_achievements(message, achievements)
+            return
         total = len(category_boosts)
         total_pages = max(1, (total + BOOSTS_PER_PAGE - 1) // BOOSTS_PER_PAGE)
         page = int(data.get("page", 0))
@@ -4709,16 +4774,19 @@ async def render_boosts(
         )
         header_lines = [
             f"{meta['icon']} Категория «{meta['label']}» — {total} улучшений",
+            f"💰 Баланс: {format_price(user.balance)}",
         ]
         if total_pages > 1:
             header_lines.append(f"Страница {page + 1}/{total_pages}")
-        header_lines.append("Выберите улучшение кнопками ниже.")
-        text = "\n".join(header_lines)
+        header_lines.append("Выбирай цифрой ниже или возвращайся к категориям.")
         if text_body:
-            text = f"{text}\n\n{text_body}"
+            header_lines.extend(["", text_body])
+        else:
+            header_lines.append("")
+            header_lines.append("Пока нечего прокачивать в этой категории.")
         await message.answer(
-            text,
-            reply_markup=kb_boosts_controls(category, has_prev, has_next),
+            "\n".join(header_lines),
+            reply_markup=kb_boosts_controls(has_prev, has_next, len(sub)),
         )
         await state.update_data(
             boost_ids=selectable,
@@ -4776,7 +4844,7 @@ async def shop_boosts(message: Message, state: FSMContext):
     await state.set_state(ShopState.boosts)
     await state.update_data(
         page=0,
-        boost_category=BOOST_CATEGORY_DEFAULT,
+        boost_category=None,
     )
     await render_boosts(message, state)
 
@@ -4803,6 +4871,18 @@ async def shop_boosts_select_category(message: Message, state: FSMContext):
         return
     await state.update_data(boost_category=category, page=0)
     await render_boosts(message, state)
+
+
+@router.message(ShopState.boosts, F.text == RU.BTN_BACK)
+@safe_handler
+async def shop_boosts_back(message: Message, state: FSMContext):
+    data = await state.get_data()
+    if data.get("boost_category"):
+        await state.update_data(boost_category=None, page=0, boost_ids=[])
+        await render_boosts(message, state)
+        return
+    await state.set_state(ShopState.root)
+    await message.answer(RU.SHOP_HEADER, reply_markup=kb_shop_menu())
 
 
 @router.message(ShopState.boosts, F.text == RU.BTN_PREV)
