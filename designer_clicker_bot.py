@@ -131,6 +131,7 @@ class ComboTracker:
 
 
 _combo_states: Dict[int, ComboTracker] = {}
+_extra_phrase_last_sent: Dict[int, float] = {}
 
 
 class JsonLogFormatter(logging.Formatter):
@@ -368,6 +369,8 @@ CLICK_EXTRA_PHRASES = [
     "☕ Латте на столе, кисти готовы. Работает как часы!",
     "📈 Клиент видит прогресс и улыбается.",
 ]
+CLICK_EXTRA_PHRASE_CHANCE = 0.15
+CLICK_EXTRA_PHRASE_COOLDOWN = 60.0
 
 ORDER_DONE_EXTRA = [
     "Клиент в восторге!",
@@ -545,14 +548,6 @@ async def main_menu_for_message(
     return await build_main_menu_markup(session=session, user=user, tg_id=message.from_user.id)
 
 
-def tutorial_skip_markup() -> InlineKeyboardMarkup:
-    """Inline клавиатура для пропуска обучения."""
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=RU.BTN_TUTORIAL_SKIP, callback_data="tutorial_skip")]]
-    )
-
-
 def ensure_tutorial_payload(user: User) -> Dict[str, Any]:
     """Guarantee that tutorial payload is a mutable dict."""
 
@@ -598,7 +593,7 @@ async def send_tutorial_prompt(message: Message, user: User, stage: int) -> None
     if not text:
         await message.answer(RU.TUTORIAL_DONE)
         return
-    await message.answer(text, reply_markup=tutorial_skip_markup())
+    await message.answer(text, reply_markup=kb_tutorial())
 
 
 async def tutorial_on_event(
@@ -3536,14 +3531,19 @@ async def get_user_boost_by_code(
     )
 
 
-async def ensure_user_loaded(session: AsyncSession, message: Message) -> Optional[User]:
+async def ensure_user_loaded(
+    session: AsyncSession, message: Message, *, tg_id: Optional[int] = None
+) -> Optional[User]:
     """Return user for message or notify user to start the bot."""
 
-    user = await get_user_by_tg(session, message.from_user.id)
+    target_id = tg_id or (message.from_user.id if message.from_user else None)
+    if target_id is None:
+        return None
+    user = await get_user_by_tg(session, target_id)
     if not user:
         await message.answer(
             "Нажмите /start",
-            reply_markup=await main_menu_for_message(message, session=session),
+            reply_markup=await build_main_menu_markup(session=session, tg_id=target_id),
         )
         return None
     return user
@@ -3615,29 +3615,6 @@ async def tutorial_skip(message: Message, state: FSMContext):
     )
 
 
-@router.callback_query(F.data == "tutorial_skip")
-@safe_handler
-async def tutorial_skip_callback(callback: CallbackQuery, state: FSMContext):
-    if not callback.message:
-        await callback.answer()
-        return
-    async with session_scope() as session:
-        user = await ensure_user_loaded(session, callback.message)
-        if not user:
-            await state.clear()
-            await callback.answer()
-            return
-        user.tutorial_stage = TUTORIAL_STAGE_DONE
-        user.tutorial_completed_at = utcnow()
-        user.updated_at = utcnow()
-    await state.clear()
-    await callback.answer()
-    await callback.message.answer(
-        RU.TUTORIAL_DONE,
-        reply_markup=await build_main_menu_markup(tg_id=callback.message.chat.id),
-    )
-
-
 @router.callback_query(F.data.startswith("event_choice:"))
 @safe_handler
 async def handle_event_choice_callback(callback: CallbackQuery, state: FSMContext):
@@ -3654,7 +3631,7 @@ async def handle_event_choice_callback(callback: CallbackQuery, state: FSMContex
         return
     choice_idx = int(idx_str)
     async with session_scope() as session:
-        user = await ensure_user_loaded(session, callback.message)
+        user = await ensure_user_loaded(session, callback.message, tg_id=callback.from_user.id)
         if not user:
             await callback.answer()
             return
@@ -3769,8 +3746,12 @@ async def handle_click(message: Message, state: FSMContext):
         progress_markup: Optional[ReplyKeyboardMarkup] = None
         show_progress = (active.progress_clicks // 10) > (prev // 10) or active.progress_clicks == active.required_clicks
         extra_phrase: Optional[str] = None
-        if random.random() < 0.33:
-            extra_phrase = random.choice(CLICK_EXTRA_PHRASES)
+        if random.random() < CLICK_EXTRA_PHRASE_CHANCE:
+            last_extra = _extra_phrase_last_sent.get(user.id, 0.0)
+            now_extra = time.monotonic()
+            if now_extra - last_extra >= CLICK_EXTRA_PHRASE_COOLDOWN:
+                extra_phrase = random.choice(CLICK_EXTRA_PHRASES)
+                _extra_phrase_last_sent[user.id] = now_extra
         if show_progress:
             pct = int(100 * active.progress_clicks / active.required_clicks)
             progress_lines.append(
