@@ -1248,6 +1248,15 @@ SEED_BOOSTS = [
         "min_level": 1,
     },
     {
+        "code": "inspiration",
+        "name": "💡 Вдохновение",
+        "type": "cp",
+        "base_cost": 450,
+        "growth": 1.30,
+        "step_value": 5,
+        "min_level": 1,
+    },
+    {
         "code": "passive_income_plus",
         "name": "💼 Пассивный доход",
         "type": "passive",
@@ -1264,6 +1273,24 @@ SEED_BOOSTS = [
         "growth": 1.25,
         "step_value": 1,
         "min_level": 1,
+    },
+    {
+        "code": "coffee_break",
+        "name": "🧃 Кофе-брейк",
+        "type": "cp",
+        "base_cost": 620,
+        "growth": 1.30,
+        "step_value": 8,
+        "min_level": 2,
+    },
+    {
+        "code": "motivation",
+        "name": "🧠 Мотивация",
+        "type": "cp",
+        "base_cost": 700,
+        "growth": 1.30,
+        "step_value": 10,
+        "min_level": 3,
     },
     {
         "code": "accelerated_learning",
@@ -1309,6 +1336,15 @@ SEED_BOOSTS = [
         "growth": 1.27,
         "step_value": 0.06,
         "min_level": 3,
+    },
+    {
+        "code": "focus_playlist",
+        "name": "🎧 Фокус-плейлист",
+        "type": "cp",
+        "base_cost": 950,
+        "growth": 1.32,
+        "step_value": 25,
+        "min_level": 4,
     },
     {
         "code": "combo_click",
@@ -1383,6 +1419,60 @@ SEED_BOOSTS = [
         "min_level": 5,
     },
     {
+        "code": "new_devices",
+        "name": "💻 Новые девайсы",
+        "type": "cp",
+        "base_cost": 1500,
+        "growth": 1.32,
+        "step_value": 50,
+        "min_level": 6,
+    },
+    {
+        "code": "software_upgrade",
+        "name": "📱 Апгрейд софта",
+        "type": "cp",
+        "base_cost": 2400,
+        "growth": 1.33,
+        "step_value": 75,
+        "min_level": 8,
+    },
+    {
+        "code": "creative_flow",
+        "name": "🪄 Креативный поток",
+        "type": "cp",
+        "base_cost": 4100,
+        "growth": 1.34,
+        "step_value": 120,
+        "min_level": 10,
+    },
+    {
+        "code": "graphic_tablet_pro",
+        "name": "🎨 Графический планшет Pro",
+        "type": "cp",
+        "base_cost": 6900,
+        "growth": 1.35,
+        "step_value": 200,
+        "min_level": 12,
+    },
+    {
+        "code": "designer_team",
+        "name": "🧩 Команда дизайнеров",
+        "type": "cp",
+        "base_cost": 12500,
+        "growth": 1.36,
+        "step_value": 400,
+        "min_level": 14,
+    },
+    {
+        "code": "design_genius",
+        "name": "🚀 Гений дизайна",
+        "type": "cp",
+        "base_cost": 30000,
+        "growth": 1.38,
+        "step_value": 1000,
+        "min_level": 16,
+    },
+    {
         "code": "gear_tuning",
         "name": "🧰 Тюнинг экипировки",
         "type": "equipment_eff",
@@ -1423,6 +1513,36 @@ SEED_BOOSTS = [
 BOOST_EXTRA_META: Dict[str, Dict[str, Any]] = {
     "critical_strike": {"crit_multiplier": 1.5},
     "combo_click": {"combo_cap": 2.0},
+    "inspiration": {
+        "flavor": "Свежие идеи приходят одна за другой — пальцы сами тянутся к мышке.",
+    },
+    "coffee_break": {
+        "flavor": "Кофеин течёт в венах, продуктивность зашкаливает.",
+    },
+    "motivation": {
+        "flavor": "Новая цель зажигает внутри — клики звучат громче.",
+    },
+    "focus_playlist": {
+        "flavor": "Правильная музыка делает дизайн бесконечным потоком.",
+    },
+    "new_devices": {
+        "flavor": "Твой ПК мурлычет, а курсор летает быстрее мысли.",
+    },
+    "software_upgrade": {
+        "flavor": "Обновлённый Photoshop открывает новые горизонты.",
+    },
+    "creative_flow": {
+        "flavor": "Вдохновение бьёт фонтаном — каждый клик как озарение.",
+    },
+    "graphic_tablet_pro": {
+        "flavor": "Каждый штрих — произведение искусства.",
+    },
+    "designer_team": {
+        "flavor": "Команда творцов кликает синхронно с тобой.",
+    },
+    "design_genius": {
+        "flavor": "Ты превзошёл самого себя. Каждое касание — шедевр.",
+    },
 }
 
 SEED_TEAM = [
@@ -4347,14 +4467,18 @@ def format_boost_purchase_prompt(
     else:
         current_line = "Текущий уровень: 0 — бонус пока отсутствует"
     next_effect = _boost_effect_for_level(boost, next_level)
-    return (
-        f"{icon} Улучшение «{label}»\n"
-        f"{current_line}\n"
-        f"После покупки: {next_level} — {next_effect}\n"
-        f"Бонус за уровень: {step_effect}\n"
-        f"Стоимость: {format_price(cost)}\n"
-        "Эффект действует постоянно."
-    )
+    parts = [
+        f"{icon} Улучшение «{label}»",
+        current_line,
+        f"После покупки: {next_level} — {next_effect}",
+        f"Бонус за уровень: {step_effect}",
+        f"Стоимость: {format_price(cost)}",
+    ]
+    flavor = BOOST_EXTRA_META.get(boost.code, {}).get("flavor")
+    if flavor:
+        parts.append(flavor)
+    parts.append("Эффект действует постоянно.")
+    return "\n".join(parts)
 
 
 def format_item_purchase_prompt(item: Item, price: int) -> str:
