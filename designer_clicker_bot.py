@@ -550,10 +550,10 @@ def _reply_keyboard(rows: List[List[str]]) -> ReplyKeyboardMarkup:
 
 def kb_main_menu(has_active_order: bool = False) -> ReplyKeyboardMarkup:
     rows: List[List[str]] = []
-    if has_active_order:
-        rows.append([RU.BTN_RETURN_ORDER])
     rows.append([RU.BTN_ORDERS])
     rows.append([RU.BTN_UPGRADES, RU.BTN_PROFILE])
+    if has_active_order:
+        rows.append([RU.BTN_RETURN_ORDER])
     return _reply_keyboard(rows)
 
 
@@ -595,7 +595,7 @@ def kb_upgrades_menu(include_team: bool, *, tutorial: bool = False) -> ReplyKeyb
     if tutorial:
         rows: List[List[str]] = [[RU.BTN_SHOP]]
     else:
-        rows = [[RU.BTN_SHOP], [RU.BTN_WARDROBE]]
+        rows = [[RU.BTN_SHOP, RU.BTN_WARDROBE]]
         if include_team:
             rows.append([RU.BTN_TEAM])
         rows.append([RU.BTN_BACK])
