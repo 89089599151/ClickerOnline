@@ -539,15 +539,18 @@ def kb_active_order_controls() -> ReplyKeyboardMarkup:
 def kb_numeric_page(
     show_prev: bool, show_next: bool, add_back: bool = True, *, tutorial: bool = False
 ) -> ReplyKeyboardMarkup:
-    rows: List[List[str]] = [[str(i) for i in range(1, 6)]]
+    rows: List[List[str]] = []
+    rows.append([str(i) for i in range(1, 6)])
     nav_row: List[str] = []
     if show_prev:
         nav_row.append(RU.BTN_PREV)
+    if add_back:
+        nav_row.append(RU.BTN_BACK)
     if show_next:
         nav_row.append(RU.BTN_NEXT)
     if nav_row:
         rows.append(nav_row)
-    if add_back:
+    elif add_back:
         rows.append([RU.BTN_BACK])
     _append_tutorial_skip(rows, tutorial)
     return _reply_keyboard(rows)
@@ -601,14 +604,15 @@ def kb_boosts_controls(
     has_prev: bool, has_next: bool, count: int, *, tutorial: bool = False
 ) -> ReplyKeyboardMarkup:
     rows: List[List[str]] = []
-    nav_row: List[str] = [RU.BTN_BACK]
+    if count > 0:
+        rows.append([str(i) for i in range(1, count + 1)])
+    nav_row: List[str] = []
     if has_prev:
         nav_row.append(RU.BTN_PREV)
+    nav_row.append(RU.BTN_BACK)
     if has_next:
         nav_row.append(RU.BTN_NEXT)
     rows.append(nav_row)
-    if count > 0:
-        rows.append([str(i) for i in range(1, count + 1)])
     _append_tutorial_skip(rows, tutorial)
     return _reply_keyboard(rows)
 
@@ -4686,11 +4690,12 @@ def fmt_orders(
     special_hint: bool = False,
     trend: Optional[Dict[str, Any]] = None,
 ) -> str:
-    lines = [RU.ORDERS_HEADER, "Введите номер для выбора:"]
+    lines = [RU.ORDERS_HEADER, "Выбирайте цифрой внизу, чтобы оформить заказ."]
     if special_hint:
         lines.append("")
         lines.append(RU.SPECIAL_ORDER_AVAILABLE)
-    lines.append("")
+    if orders:
+        lines.append("")
     trend_order_id = int(trend.get("order_id")) if trend else None
     trend_mul = float(trend.get("reward_mul", TREND_REWARD_MUL)) if trend else TREND_REWARD_MUL
     for i, o in enumerate(orders, 1):
@@ -4729,10 +4734,14 @@ def fmt_orders(
             suffix_parts.append(f"🔥 ×{format_stat(trend_mul)}")
         if rarity in {"rare", "holiday"}:
             suffix_parts.append(ORDER_RARITY_TITLES.get(rarity, rarity))
-        lines.append(
-            f"{circled_number(i)} {prefix} {title}\n   "
-            + " · ".join(part for part in suffix_parts if part)
-        )
+        header = f"{circled_number(i)} {prefix} {title}".strip()
+        details = " · ".join(part for part in suffix_parts if part)
+        lines.append(header)
+        lines.append(f"   {details}")
+        if i != len(orders):
+            lines.append("")
+    if lines and not lines[-1]:
+        lines.pop()
     return "\n".join(lines)
 
 
