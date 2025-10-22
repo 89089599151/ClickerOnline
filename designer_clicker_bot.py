@@ -223,6 +223,10 @@ class RU:
     BTN_SKILLS = "🎯 Навыки"
     BTN_QUEST = "😈 Квест"
     BTN_STUDIO = "🏢 Студия"
+    BTN_PROFILE_CAT_STATS = "📊 Статистика и задачи"
+    BTN_PROFILE_CAT_PROGRESS = "🎯 Прогресс"
+    BTN_PROFILE_CAT_LONG_TERM = "🗺️ Долгосрочные цели"
+    BTN_PROFILE_CAT_SOCIAL = "🤝 Сообщество"
 
     # Общие
     BTN_MENU = "🏠 Меню"
@@ -526,15 +530,27 @@ def kb_boosts_controls(has_prev: bool, has_next: bool, count: int) -> ReplyKeybo
     return _reply_keyboard(rows)
 
 
-def kb_profile_menu(has_active_order: bool) -> ReplyKeyboardMarkup:
-    """Return profile keyboard grouped by category blocks."""
+PROFILE_MENU_CATEGORY_LABELS: Set[str] = {
+    RU.BTN_PROFILE_CAT_STATS,
+    RU.BTN_PROFILE_CAT_PROGRESS,
+    RU.BTN_PROFILE_CAT_LONG_TERM,
+    RU.BTN_PROFILE_CAT_SOCIAL,
+}
 
-    # Обновлено: кнопки сгруппированы по тематикам, чтобы легче ориентироваться.
+
+def kb_profile_menu(has_active_order: bool) -> ReplyKeyboardMarkup:
+    """Return profile keyboard grouped by category blocks with visual headers."""
+
+    # Обновлено: добавлены явные заголовки категорий, чтобы сделать структуру понятнее.
     rows: List[List[str]] = [
-        [RU.BTN_DAILY, RU.BTN_DAILIES],  # 📊 Раздел «Статистика и задачи»
-        [RU.BTN_SKILLS, RU.BTN_ACHIEVEMENTS],  # 🎯 Прогресс игрока
-        [RU.BTN_CAMPAIGN, RU.BTN_STUDIO],  # 🗺️ Долгосрочные цели
-        [RU.BTN_REFERRAL, RU.BTN_STATS],  # 🤝 Сообщество и рейтинги
+        [RU.BTN_PROFILE_CAT_STATS],
+        [RU.BTN_DAILY, RU.BTN_DAILIES],
+        [RU.BTN_PROFILE_CAT_PROGRESS],
+        [RU.BTN_SKILLS, RU.BTN_ACHIEVEMENTS],
+        [RU.BTN_PROFILE_CAT_LONG_TERM],
+        [RU.BTN_CAMPAIGN, RU.BTN_STUDIO],
+        [RU.BTN_PROFILE_CAT_SOCIAL],
+        [RU.BTN_REFERRAL, RU.BTN_STATS],
     ]
     if has_active_order:
         # Под рукой оставляем возврат к заказу, чтобы быстрее переключаться.
@@ -5908,6 +5924,22 @@ async def profile_show(message: Message, state: FSMContext):
         if await tutorial_on_event(message, session, user, "profile_open"):
             await state.clear()
         await notify_new_achievements(message, achievements)
+
+
+@router.message(F.text.in_(PROFILE_MENU_CATEGORY_LABELS))
+@safe_handler
+async def profile_category_header(message: Message, state: FSMContext):
+    """Handle taps on category headers by reminding user to pick an option."""
+
+    async with session_scope() as session:
+        user = await ensure_user_loaded(session, message)
+        if not user:
+            return
+        active = await get_active_order(session, user)
+    await message.answer(
+        "Это заголовок раздела. Выберите нужную кнопку ниже 👇",
+        reply_markup=kb_profile_menu(has_active_order=bool(active)),
+    )
 
 
 @router.message(F.text == RU.BTN_DAILY)
