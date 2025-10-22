@@ -553,8 +553,7 @@ def kb_main_menu(has_active_order: bool = False) -> ReplyKeyboardMarkup:
     if has_active_order:
         rows.append([RU.BTN_RETURN_ORDER])
     rows.append([RU.BTN_ORDERS])
-    rows.append([RU.BTN_UPGRADES])
-    rows.append([RU.BTN_PROFILE])
+    rows.append([RU.BTN_UPGRADES, RU.BTN_PROFILE])
     return _reply_keyboard(rows)
 
 
