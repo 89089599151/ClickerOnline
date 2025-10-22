@@ -271,7 +271,7 @@ class RU:
     BTN_EQUIP = "🧩 Экипировать"
     BTN_BUY = "💳 Купить"
     BTN_UPGRADE = "⚙️ Повысить"
-    BTN_BOOSTS = "⚡ Бусты"
+    BTN_BOOSTS = "⚡ Усиления"
     BTN_EQUIPMENT = "🧰 Экипировка"
     BTN_DAILY = "🎁 Ежедневный бонус"
     BTN_CANCEL_ORDER = "🛑 Отменить заказ"
@@ -297,14 +297,14 @@ class RU:
     MENU_WITH_ORDER_HINT = "📍 Главное меню: продолжайте заказ или откройте другой раздел."
     TOO_FAST = "⏳ Темп слишком высокий. Дождитесь восстановления лимита."
     NO_ACTIVE_ORDER = "🧾 Пока нет активного заказа. Возьмите новый в разделе «Заказы»."
-    CLICK_PROGRESS = "🖱️ Прогресс: {cur}/{req} кликов ({pct}%)."
+    CLICK_PROGRESS = "🖱️ Клик ({pct}%): {cur}/{req} кликов."
     ORDER_TAKEN = "🚀 Отлично! Заказ «{title}» теперь ваш. Клиент уже ждёт макеты!"
     ORDER_ALREADY = "⚠️ Сначала завершите текущий заказ — новые выдаём только после сдачи прошлого."
     ORDER_DONE = "✅ Заказ успешно выполнен! Вознаграждение: {rub} ₽ и {xp} XP."
     ORDER_CANCELED = "↩️ Заказ отменён. Прогресс сброшен."
     ORDER_RESUME = "🧾 Продолжаем заказ «{title}». Кликай, чтобы продвинуться."
     INSUFFICIENT_FUNDS = "💸 Не хватает средств для покупки. Подкопите ещё немного и возвращайтесь!"
-    BOOST_LOCKED = "🔒 Этот буст станет доступен с {lvl} уровня."
+    BOOST_LOCKED = "🔒 Это усиление станет доступно с {lvl} уровня."
     PURCHASE_OK = "🛒 Покупка успешна! Улучшение применено."
     UPGRADE_OK = "🔼 Повышение выполнено! Уровень растёт."
     EQUIP_OK = "🧩 Экипировка активирована — стиль и статы на высоте!"
@@ -342,17 +342,17 @@ class RU:
     TUTORIAL_DONE = "🎓 Обучение завершено! Главное меню открыто — творим и зарабатываем."
     TUTORIAL_HINT = "⚡ Как будете готовы — нажмите «{button}» на клавиатуре ниже."
     TUTORIAL_LOCKED = "Сейчас идёт обучение. Нажмите «{button}» для продолжения."
-    TUTORIAL_FREE_UPGRADE_DONE = "🎓 Первый апгрейд бесплатно оформлен! Эффект активирован."
+    TUTORIAL_FREE_UPGRADE_DONE = "🎓 Первое улучшение бесплатно оформлено! Эффект активирован."
     TUTORIAL_SHOP_HINT_BOOST = (
-        "🎯 Бесплатный буст «{name}» ждёт в категории «{category}». Если список уже открыт, "
-        "просто выбери цифру напротив буста и нажми «{buy}»."
+        "🎯 Бесплатное усиление «{name}» ждёт в категории «{category}». Если список уже открыт, "
+        "просто выбери цифру напротив усиления и нажми «{buy}»."
     )
     TUTORIAL_SHOP_HINT_ITEM = (
         "🎯 Бесплатный предмет «{name}» доступен в разделе «{equipment}». Нажми «{equipment}», "
         "затем выбери цифру и кнопку «{buy}»."
     )
     TUTORIAL_SHOP_PRICE_HINT = "👀 Ищи цену {price} — это ваш подарок."
-    TUTORIAL_SHOP_LOCK = "🚪 Магазин не отпустит, пока не заберёшь бесплатный апгрейд."
+    TUTORIAL_SHOP_LOCK = "🚪 Магазин не отпустит, пока не заберёшь бесплатное улучшение."
     EVENT_POSITIVE = "{title}"
     EVENT_NEGATIVE = "{title}"
     EVENT_BUFF = "{title}"
@@ -438,7 +438,7 @@ TUTORIAL_STAGE_MESSAGES = {
         "⚙️ Отлично! Теперь открой «{upgrades}» — покажу, как прокачиваться.",
     ),
     TUTORIAL_STAGE_SHOP: (
-        "🛒 Зайди в «{shop}» и возьми первый апгрейд. Сейчас он бесплатный!",
+        "🛒 Зайди в «{shop}» и возьми первое улучшение. Сейчас оно бесплатное!",
     ),
     TUTORIAL_STAGE_FINISH: (
         "✨ Все готово. Нажми «{finish}», чтобы завершить обучение.",
@@ -2349,7 +2349,7 @@ async def seed_if_needed(session: AsyncSession) -> None:
         else:
             for key, value in payload.items():
                 setattr(order, key, value)
-    # Бусты
+    # Усиления
     existing_boosts = {
         boost.code: boost for boost in (await session.execute(select(Boost))).scalars()
     }
@@ -4496,7 +4496,6 @@ async def handle_click(message: Message, state: FSMContext):
         active.progress_clicks = min(active.required_clicks, active.progress_clicks + cp)
         progress_lines: List[str] = []
         progress_markup: Optional[ReplyKeyboardMarkup] = None
-        show_progress = (active.progress_clicks // 10) > (prev // 10) or active.progress_clicks == active.required_clicks
         extra_phrase: Optional[str] = None
         if random.random() < CLICK_EXTRA_PHRASE_CHANCE:
             last_extra = _extra_phrase_last_sent.get(user.id, 0.0)
@@ -4504,12 +4503,11 @@ async def handle_click(message: Message, state: FSMContext):
             if now_extra - last_extra >= CLICK_EXTRA_PHRASE_COOLDOWN:
                 extra_phrase = random.choice(CLICK_EXTRA_PHRASES)
                 _extra_phrase_last_sent[user.id] = now_extra
-        if show_progress:
-            pct = int(100 * active.progress_clicks / active.required_clicks)
-            progress_lines.append(
-                RU.CLICK_PROGRESS.format(cur=active.progress_clicks, req=active.required_clicks, pct=pct)
-            )
-            progress_markup = kb_active_order_controls()
+        pct = int(round(100 * active.progress_clicks / active.required_clicks))
+        progress_lines.append(
+            RU.CLICK_PROGRESS.format(cur=active.progress_clicks, req=active.required_clicks, pct=pct)
+        )
+        progress_markup = kb_active_order_controls()
         if crit_triggered:
             crit_line = f"💥 Критический клик! ×{format_stat(crit_multiplier)}"
             progress_lines.append(crit_line)
@@ -5376,7 +5374,7 @@ def format_boost_purchase_prompt(
     ]
     if free_available:
         parts.append(f"Стоимость: {FREE_UPGRADE_PRICE_LABEL}")
-        parts.append("🎓 Первый апгрейд оформляется без списания монет.")
+        parts.append("🎓 Первое улучшение оформляется без списания монет.")
     else:
         parts.append(f"Стоимость: {format_price(cost)}")
     flavor = BOOST_EXTRA_META.get(boost.code, {}).get("flavor")
@@ -5400,7 +5398,7 @@ def format_item_purchase_prompt(
         f"Цена: {price_text}",
     ]
     if free_available:
-        lines.append("🎓 Первый апгрейд оформляется без списания монет.")
+        lines.append("🎓 Первое улучшение оформляется без списания монет.")
     return "\n".join(lines)
 
 
@@ -5475,7 +5473,7 @@ async def render_boosts(
                 for boost in boosts:
                     counts[_boost_category(boost)] += 1
                 lines = [
-                    "🛍️ Магазин бустов — выбери направление",
+                    "🛍️ Магазин усилений — выбери направление",
                     f"💰 Баланс: {format_price(user.balance)}",
                     "",
                 ]
@@ -5562,7 +5560,7 @@ async def _handle_boost_selection(
             return
         boost = await session.scalar(select(Boost).where(Boost.id == boost_id))
         if not boost:
-            await message.answer("Буст не найден.")
+            await message.answer("Усиление не найдено.")
             await state.set_state(ShopState.boosts)
             await render_boosts(message, state, tg_id=tg_id)
             return
@@ -5683,7 +5681,7 @@ async def shop_buy_boost(message: Message, state: FSMContext):
         await process_offline_income(session, user, achievements)
         boost = await session.scalar(select(Boost).where(Boost.id == bid))
         if not boost:
-            await message.answer("Буст не найден.")
+            await message.answer("Усиление не найдено.")
             await state.set_state(ShopState.boosts)
             await render_boosts(message, state)
             return
@@ -7057,7 +7055,7 @@ async def admin_give_shield(message: Message):
             return
         boost = await session.scalar(select(Boost).where(Boost.code == EVENT_SHIELD_CODE))
         if not boost:
-            await message.answer("Буст страховки не найден.")
+            await message.answer("Усиление страховки не найдено.")
             return
         entry = await get_user_boost_by_code(session, user, EVENT_SHIELD_CODE)
         if not entry:
