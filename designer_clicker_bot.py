@@ -46,7 +46,6 @@ except Exception:
 
 # --- aiogram ---
 from aiogram import Bot, Dispatcher, Router, F, BaseMiddleware
-from aiogram.exceptions import SkipHandler
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -4273,7 +4272,7 @@ async def tutorial_gatekeeper(message: Message, state: FSMContext):
             return
         hint_button = TUTORIAL_STAGE_HINT_BUTTONS.get(stage, RU.BTN_TUTORIAL_NEXT)
         await message.answer(RU.TUTORIAL_LOCKED.format(button=hint_button))
-    raise SkipHandler
+        return
 
 
 @router.callback_query(F.data.startswith("event_choice:"))
