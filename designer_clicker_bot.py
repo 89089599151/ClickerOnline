@@ -610,13 +610,21 @@ def kb_profile_menu(
     return _reply_keyboard(rows)
 
 
-def tutorial_keyboard(stage: int) -> ReplyKeyboardMarkup:
+def tutorial_keyboard(stage: int) -> Optional[ReplyKeyboardMarkup]:
     """Return a minimal keyboard for the current tutorial stage."""
 
+    rows: Optional[List[List[str]]] = None
     if stage == TUTORIAL_STAGE_INTRO:
         rows = [[RU.BTN_TUTORIAL_NEXT, RU.BTN_TUTORIAL_SKIP]]
     elif stage == TUTORIAL_STAGE_GO_ORDERS:
         rows = [[RU.BTN_ORDERS], [RU.BTN_TUTORIAL_SKIP]]
+    elif stage == TUTORIAL_STAGE_ORDER_PICK:
+        rows = [
+            ["1", "2", "3", "4", "5"],
+            [RU.BTN_PREV, RU.BTN_NEXT],
+            [RU.BTN_BACK],
+            [RU.BTN_TUTORIAL_SKIP],
+        ]
     elif stage == TUTORIAL_STAGE_CLICKS:
         rows = [[RU.BTN_CLICK], [RU.BTN_TO_MENU], [RU.BTN_TUTORIAL_SKIP]]
     elif stage == TUTORIAL_STAGE_UPGRADES:
@@ -625,8 +633,8 @@ def tutorial_keyboard(stage: int) -> ReplyKeyboardMarkup:
         rows = [[RU.BTN_SHOP], [RU.BTN_TUTORIAL_SKIP]]
     elif stage == TUTORIAL_STAGE_FINISH:
         rows = [[RU.BTN_TUTORIAL_FINISH]]
-    else:
-        rows = [[RU.BTN_TUTORIAL_SKIP]]
+    if not rows:
+        return None
     return _reply_keyboard(rows)
 
 
@@ -702,6 +710,8 @@ def tutorial_stage_text(user: User, stage: int) -> Optional[str]:
     if not template:
         return None
     name = user.first_name or "дизайнер"
+    if isinstance(template, (list, tuple)):
+        template = "\n".join(template)
     text = template.format(
         name=name,
         orders=RU.BTN_ORDERS,
@@ -787,7 +797,8 @@ async def send_tutorial_prompt(message: Message, user: User, stage: int) -> None
     if not text:
         await message.answer(RU.TUTORIAL_DONE)
         return
-    await message.answer(text, reply_markup=tutorial_keyboard(stage))
+    markup = tutorial_keyboard(stage)
+    await message.answer(text, reply_markup=markup)
 
 
 async def tutorial_on_event(
@@ -836,7 +847,7 @@ async def tutorial_on_event(
     if advanced:
         user.updated_at = now
         await send_tutorial_prompt(message, user, user.tutorial_stage)
-    return False
+    return advanced
 
 
 def ensure_daily_task_state(user: User) -> Dict[str, Any]:
