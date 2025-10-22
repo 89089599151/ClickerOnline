@@ -390,6 +390,7 @@ TUTORIAL_STAGE_FINISH = 6
 TUTORIAL_STAGE_DONE = 7
 
 TUTORIAL_REQUIRED_CLICKS = 3
+TUTORIAL_TOTAL_STEPS = TUTORIAL_STAGE_FINISH + 1
 
 TUTORIAL_STAGE_MESSAGES = {
     TUTORIAL_STAGE_INTRO: (
@@ -632,7 +633,7 @@ def tutorial_keyboard(stage: int) -> Optional[ReplyKeyboardMarkup]:
     elif stage == TUTORIAL_STAGE_SHOP:
         rows = [[RU.BTN_SHOP], [RU.BTN_TUTORIAL_SKIP]]
     elif stage == TUTORIAL_STAGE_FINISH:
-        rows = [[RU.BTN_TUTORIAL_FINISH]]
+        rows = [[RU.BTN_TUTORIAL_FINISH], [RU.BTN_TUTORIAL_SKIP]]
     if not rows:
         return None
     return _reply_keyboard(rows)
@@ -723,7 +724,9 @@ def tutorial_stage_text(user: User, stage: int) -> Optional[str]:
         need=TUTORIAL_REQUIRED_CLICKS,
     )
     hint_button = TUTORIAL_STAGE_HINT_BUTTONS.get(stage)
-    lines = [text]
+    step_index = min(stage, TUTORIAL_STAGE_FINISH)
+    step_prefix = f"🧭 Шаг {step_index + 1} из {TUTORIAL_TOTAL_STEPS}"
+    lines = [step_prefix, "", text]
     if hint_button:
         lines.append("")
         lines.append(RU.TUTORIAL_HINT.format(button=hint_button))
@@ -825,6 +828,14 @@ async def tutorial_on_event(
             payload.pop("clicks", None)
             user.tutorial_stage = TUTORIAL_STAGE_UPGRADES
             advanced = True
+    elif stage == TUTORIAL_STAGE_CLICKS and event == "order_completed":
+        payload.pop("clicks", None)
+        user.tutorial_stage = TUTORIAL_STAGE_UPGRADES
+        advanced = True
+    elif event == "order_completed" and TUTORIAL_STAGE_CLICKS < stage < TUTORIAL_STAGE_DONE:
+        user.updated_at = now
+        await send_tutorial_prompt(message, user, stage)
+        return False
     elif stage == TUTORIAL_STAGE_UPGRADES and event == "upgrades_open":
         user.tutorial_stage = TUTORIAL_STAGE_SHOP
         advanced = True
@@ -4382,6 +4393,7 @@ async def handle_click(message: Message, state: FSMContext):
                 reply_markup=await build_main_menu_markup(tg_id=message.from_user.id),
             )
             return
+        order_completed = False
         stats = await get_user_stats(session, user)
         base_cp = float(stats["cp"])
         combo_step = stats.get("combo_step", 0.0)
@@ -4543,6 +4555,7 @@ async def handle_click(message: Message, state: FSMContext):
                     else:
                         await message.answer(text_event, reply_markup=menu_markup)
             achievements.extend(await evaluate_achievements(session, user, {"orders", "level", "balance"}))
+            order_completed = True
         if event_payload:
             text, inline_markup = event_payload
             if text and text.strip():
@@ -4551,6 +4564,12 @@ async def handle_click(message: Message, state: FSMContext):
                 else:
                     await message.answer(text, reply_markup=kb_active_order_controls())
         await notify_new_achievements(message, achievements)
+        if order_completed:
+            advanced_after_finish = await tutorial_on_event(
+                message, session, user, "order_completed"
+            )
+            if advanced_after_finish:
+                await state.clear()
 
 
 @router.message(F.text == RU.BTN_TO_MENU)
