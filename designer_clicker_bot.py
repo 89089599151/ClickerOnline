@@ -127,6 +127,24 @@ BOOST_CP_ADD_GROWTH = 1.45
 BOOSTS_PER_PAGE = 5
 BOOST_SELECTION_INPUTS = {str(i) for i in range(1, BOOSTS_PER_PAGE + 1)}
 
+# Доп. словари для витрины заказов.
+ORDER_DIFFICULTY_LABELS: Dict[str, str] = {
+    "easy": "Лёгкий",
+    "normal": "Средний",
+    "hard": "Сложный",
+    "expert": "Эксперт",
+}
+ORDER_RARITY_ICONS: Dict[str, str] = {
+    "common": "",  # Базовые заказы без подсветки
+    "rare": "💎",
+    "holiday": "🎉",
+}
+ORDER_RARITY_TITLES: Dict[str, str] = {
+    "common": "обычный",
+    "rare": "редкий",
+    "holiday": "праздничный",
+}
+
 
 @dataclass
 class ComboTracker:
@@ -509,11 +527,18 @@ def kb_boosts_controls(has_prev: bool, has_next: bool, count: int) -> ReplyKeybo
 
 
 def kb_profile_menu(has_active_order: bool) -> ReplyKeyboardMarkup:
-    rows: List[List[str]] = [[RU.BTN_DAILY, RU.BTN_SKILLS]]
-    _ = has_active_order  # Signature kept for compatibility with legacy callers.
-    rows.append([RU.BTN_DAILIES, RU.BTN_STATS])
-    rows.append([RU.BTN_ACHIEVEMENTS, RU.BTN_CAMPAIGN])
-    rows.append([RU.BTN_REFERRAL, RU.BTN_STUDIO])
+    """Return profile keyboard grouped by category blocks."""
+
+    # Обновлено: кнопки сгруппированы по тематикам, чтобы легче ориентироваться.
+    rows: List[List[str]] = [
+        [RU.BTN_DAILY, RU.BTN_DAILIES],  # 📊 Раздел «Статистика и задачи»
+        [RU.BTN_SKILLS, RU.BTN_ACHIEVEMENTS],  # 🎯 Прогресс игрока
+        [RU.BTN_CAMPAIGN, RU.BTN_STUDIO],  # 🗺️ Долгосрочные цели
+        [RU.BTN_REFERRAL, RU.BTN_STATS],  # 🤝 Сообщество и рейтинги
+    ]
+    if has_active_order:
+        # Под рукой оставляем возврат к заказу, чтобы быстрее переключаться.
+        rows.append([RU.BTN_RETURN_ORDER])
     rows.append([RU.BTN_BACK])
     return _reply_keyboard(rows)
 
@@ -888,6 +913,12 @@ class Order(Base):
     base_clicks: Mapped[int] = mapped_column(Integer)
     min_level: Mapped[int] = mapped_column(Integer, default=1)
     is_special: Mapped[bool] = mapped_column(Boolean, default=False)
+    reward_multiplier: Mapped[float] = mapped_column(Float, default=1.0)
+    reward_preview: Mapped[int] = mapped_column(Integer, default=0)
+    difficulty: Mapped[str] = mapped_column(String(16), default="normal")
+    estimated_minutes: Mapped[int] = mapped_column(Integer, default=30)
+    rarity: Mapped[str] = mapped_column(String(16), default="common")
+    appearance_weight: Mapped[float] = mapped_column(Float, default=0.0)
     __table_args__ = (Index("ix_orders_min_level", "min_level"),)
 
 
@@ -1206,6 +1237,34 @@ async def ensure_schema(session: AsyncSession) -> None:
     if "trend_multiplier" not in user_order_columns:
         await session.execute(text("ALTER TABLE user_orders ADD COLUMN trend_multiplier FLOAT NOT NULL DEFAULT 1.0"))
 
+    order_columns = await _existing_columns("orders")
+    if "reward_multiplier" not in order_columns:
+        await session.execute(
+            text("ALTER TABLE orders ADD COLUMN reward_multiplier FLOAT NOT NULL DEFAULT 1.0")
+        )
+    if "reward_preview" not in order_columns:
+        await session.execute(
+            text("ALTER TABLE orders ADD COLUMN reward_preview INTEGER NOT NULL DEFAULT 0")
+        )
+    if "difficulty" not in order_columns:
+        await session.execute(
+            text("ALTER TABLE orders ADD COLUMN difficulty TEXT NOT NULL DEFAULT 'normal'")
+        )
+    if "estimated_minutes" not in order_columns:
+        await session.execute(
+            text(
+                "ALTER TABLE orders ADD COLUMN estimated_minutes INTEGER NOT NULL DEFAULT 30"
+            )
+        )
+    if "rarity" not in order_columns:
+        await session.execute(
+            text("ALTER TABLE orders ADD COLUMN rarity TEXT NOT NULL DEFAULT 'common'")
+        )
+    if "appearance_weight" not in order_columns:
+        await session.execute(
+            text("ALTER TABLE orders ADD COLUMN appearance_weight FLOAT NOT NULL DEFAULT 0.0")
+        )
+
     boost_columns = await _existing_columns("boosts")
     if "min_level" not in boost_columns:
         await session.execute(
@@ -1242,23 +1301,182 @@ async def ensure_schema(session: AsyncSession) -> None:
 # ----------------------------------------------------------------------------
 
 SEED_ORDERS = [
-    {"title": "Визитка для фрилансера", "base_clicks": 100, "min_level": 1},
-    {"title": "Обложка для VK", "base_clicks": 180, "min_level": 1},
-    {"title": "Логотип для кафе", "base_clicks": 300, "min_level": 2},
-    {"title": "Лендинг (1 экран)", "base_clicks": 600, "min_level": 3},
-    {"title": "Брендбук (мини)", "base_clicks": 1200, "min_level": 5},
-    {"title": "Редизайн логотипа", "base_clicks": 800, "min_level": 4},
-    {"title": "UX-аудит мобильного приложения", "base_clicks": 2200, "min_level": 6},
-    {"title": "Редизайн приложения (ядро)", "base_clicks": 3000, "min_level": 8},
-    {"title": "Брендинг для корпорации", "base_clicks": 4200, "min_level": 10},
-    {"title": "Сайт компании 5 экранов", "base_clicks": 5500, "min_level": 12},
-    {"title": "Международная кампания бренда", "base_clicks": 8000, "min_level": 15},
-    {"title": "Глобальный ребрендинг", "base_clicks": 12000, "min_level": 18},
+    {
+        "title": "Аватар для соцсетей",
+        "base_clicks": 80,
+        "min_level": 1,
+        "difficulty": "easy",
+        "estimated_minutes": 5,
+    },
+    {
+        "title": "Визитка для фрилансера",
+        "base_clicks": 100,
+        "min_level": 1,
+        "difficulty": "easy",
+        "estimated_minutes": 7,
+    },
+    {
+        "title": "Серия сторис для Instagram",
+        "base_clicks": 200,
+        "min_level": 1,
+        "difficulty": "easy",
+        "estimated_minutes": 10,
+        "reward_multiplier": 1.05,
+    },
+    {
+        "title": "Обложка для VK",
+        "base_clicks": 180,
+        "min_level": 1,
+        "difficulty": "normal",
+        "estimated_minutes": 12,
+    },
+    {
+        "title": "Логотип для кафе",
+        "base_clicks": 300,
+        "min_level": 2,
+        "difficulty": "normal",
+        "estimated_minutes": 20,
+        "reward_multiplier": 1.1,
+    },
+    {
+        "title": "Презентация для стартапа",
+        "base_clicks": 420,
+        "min_level": 2,
+        "difficulty": "normal",
+        "estimated_minutes": 25,
+        "reward_multiplier": 1.15,
+    },
+    {
+        "title": "Пакет баннеров для рекламы",
+        "base_clicks": 900,
+        "min_level": 3,
+        "difficulty": "normal",
+        "estimated_minutes": 40,
+        "reward_multiplier": 1.05,
+    },
+    {
+        "title": "Лендинг (1 экран)",
+        "base_clicks": 600,
+        "min_level": 3,
+        "difficulty": "normal",
+        "estimated_minutes": 35,
+    },
+    {
+        "title": "Контент-план для рассылки",
+        "base_clicks": 1400,
+        "min_level": 4,
+        "difficulty": "normal",
+        "estimated_minutes": 45,
+        "reward_multiplier": 1.05,
+    },
+    {
+        "title": "Редизайн логотипа",
+        "base_clicks": 800,
+        "min_level": 4,
+        "difficulty": "hard",
+        "estimated_minutes": 45,
+        "reward_multiplier": 1.1,
+    },
+    {
+        "title": "Новогодний мерч для подписчиков",
+        "base_clicks": 1600,
+        "min_level": 4,
+        "difficulty": "normal",
+        "estimated_minutes": 50,
+        "reward_multiplier": 1.3,
+        "rarity": "holiday",
+        "appearance_weight": 0.15,
+    },
+    {
+        "title": "Хэллоуинская промо-страница",
+        "base_clicks": 1900,
+        "min_level": 5,
+        "difficulty": "hard",
+        "estimated_minutes": 55,
+        "reward_multiplier": 1.2,
+        "rarity": "holiday",
+        "appearance_weight": 0.12,
+    },
+    {
+        "title": "Брендбук (мини)",
+        "base_clicks": 1200,
+        "min_level": 5,
+        "difficulty": "hard",
+        "estimated_minutes": 60,
+    },
+    {
+        "title": "UX-аудит мобильного приложения",
+        "base_clicks": 2200,
+        "min_level": 6,
+        "difficulty": "hard",
+        "estimated_minutes": 75,
+    },
+    {
+        "title": "Коллекционный NFT-дроп",
+        "base_clicks": 2600,
+        "min_level": 7,
+        "difficulty": "hard",
+        "estimated_minutes": 90,
+        "reward_multiplier": 1.35,
+        "rarity": "rare",
+        "appearance_weight": 0.25,
+    },
+    {
+        "title": "Редизайн приложения (ядро)",
+        "base_clicks": 3000,
+        "min_level": 8,
+        "difficulty": "hard",
+        "estimated_minutes": 110,
+    },
+    {
+        "title": "Виртуальный шоурум в VR",
+        "base_clicks": 4800,
+        "min_level": 11,
+        "difficulty": "expert",
+        "estimated_minutes": 130,
+        "reward_multiplier": 1.4,
+        "rarity": "rare",
+        "appearance_weight": 0.2,
+    },
+    {
+        "title": "Брендинг для корпорации",
+        "base_clicks": 4200,
+        "min_level": 10,
+        "difficulty": "expert",
+        "estimated_minutes": 140,
+        "reward_multiplier": 1.15,
+    },
+    {
+        "title": "Сайт компании 5 экранов",
+        "base_clicks": 5500,
+        "min_level": 12,
+        "difficulty": "expert",
+        "estimated_minutes": 160,
+    },
+    {
+        "title": "Международная кампания бренда",
+        "base_clicks": 8000,
+        "min_level": 15,
+        "difficulty": "expert",
+        "estimated_minutes": 210,
+        "reward_multiplier": 1.2,
+    },
+    {
+        "title": "Глобальный ребрендинг",
+        "base_clicks": 12000,
+        "min_level": 18,
+        "difficulty": "expert",
+        "estimated_minutes": 280,
+        "reward_multiplier": 1.25,
+    },
     {
         "title": "Особый заказ: Айдентика фестиваля",
         "base_clicks": 1800,
         "min_level": SPECIAL_ORDER_MIN_LEVEL,
         "is_special": True,
+        "difficulty": "hard",
+        "estimated_minutes": 90,
+        "reward_multiplier": 1.8,
     },
 ]
 
@@ -1876,19 +2094,37 @@ async def seed_if_needed(session: AsyncSession) -> None:
     """Идемпотентная загрузка сидов при первом старте."""
     # Заказы
     existing_orders = {
-        title: oid
-        for title, oid in (await session.execute(select(Order.title, Order.id))).all()
+        order.title: order for order in (await session.execute(select(Order))).scalars()
     }
     for d in SEED_ORDERS:
-        if d["title"] not in existing_orders:
-            session.add(
-                Order(
-                    title=d["title"],
-                    base_clicks=d["base_clicks"],
-                    min_level=d["min_level"],
-                    is_special=d.get("is_special", False),
-                )
+        base_clicks = d["base_clicks"]
+        min_level = d["min_level"]
+        reward_mul = float(d.get("reward_multiplier", 1.0))
+        # Обновлено: автоматически рассчитываем предпросмотр награды.
+        preview = int(
+            d.get(
+                "reward_preview",
+                base_reward_from_required(required_clicks(base_clicks, min_level), reward_mul),
             )
+        )
+        payload = {
+            "title": d["title"],
+            "base_clicks": base_clicks,
+            "min_level": min_level,
+            "is_special": d.get("is_special", False),
+            "reward_multiplier": reward_mul,
+            "reward_preview": preview,
+            "difficulty": d.get("difficulty", "normal"),
+            "estimated_minutes": int(d.get("estimated_minutes", 30)),
+            "rarity": d.get("rarity", "common"),
+            "appearance_weight": float(d.get("appearance_weight", 0.0)),
+        }
+        order = existing_orders.get(d["title"])
+        if not order:
+            session.add(Order(**payload))
+        else:
+            for key, value in payload.items():
+                setattr(order, key, value)
     # Бусты
     existing_boosts = {
         boost.code: boost for boost in (await session.execute(select(Boost))).scalars()
@@ -3483,6 +3719,10 @@ ORDER_ICON_KEYWORDS: Tuple[Tuple[str, str], ...] = (
     ("пост", "📢"),
     ("фирмен", "🏢"),
     ("презента", "📊"),
+    ("мерч", "🎁"),
+    ("nft", "🪙"),
+    ("vr", "🕶️"),
+    ("кампан", "🚀"),
 )
 
 
@@ -3958,7 +4198,8 @@ async def handle_click(message: Message, state: FSMContext):
         cp = max(1, int(round(cp_effective)))
         user.clicks_total += cp
         achievements.extend(await evaluate_achievements(session, user, {"clicks"}))
-        await daily_task_on_event(message, session, user, "daily_clicks")
+        # Обновлено: учитываем фактическую силу клика в задании дня.
+        await daily_task_on_event(message, session, user, "daily_clicks", amount=cp)
         if await tutorial_on_event(message, session, user, "click"):
             await state.clear()
         event_payload: Optional[Tuple[str, Optional[InlineKeyboardMarkup]]] = None
@@ -4150,6 +4391,8 @@ async def resume_order_work(message: Message):
 
 def fmt_orders(
     orders: List[Order],
+    *,
+    user_level: int,
     special_hint: bool = False,
     trend: Optional[Dict[str, Any]] = None,
 ) -> str:
@@ -4161,17 +4404,45 @@ def fmt_orders(
     trend_order_id = int(trend.get("order_id")) if trend else None
     trend_mul = float(trend.get("reward_mul", TREND_REWARD_MUL)) if trend else TREND_REWARD_MUL
     for i, o in enumerate(orders, 1):
-        prefix = pick_order_icon(o.title)
+        base_icon = pick_order_icon(o.title)
+        rarity = getattr(o, "rarity", "common")
+        rarity_icon = ORDER_RARITY_ICONS.get(rarity, "")
+        prefix = f"{rarity_icon} {base_icon}".strip()
         title = o.title
-        suffix = f"мин. ур. {o.min_level}"
+        difficulty = ORDER_DIFFICULTY_LABELS.get(getattr(o, "difficulty", ""), o.difficulty)
+        estimated = int(getattr(o, "estimated_minutes", 30))
+        reward_mul = float(getattr(o, "reward_multiplier", 1.0))
+        preview = int(
+            getattr(
+                o,
+                "reward_preview",
+                base_reward_from_required(
+                    required_clicks(o.base_clicks, max(user_level, o.min_level)),
+                    reward_mul,
+                ),
+            )
+        )
+        if getattr(o, "is_special", False):
+            preview = int(round(preview * SPECIAL_ORDER_REWARD_MUL))
+        suffix_parts = [
+            f"мин. ур. {o.min_level}",
+            f"💰 {format_money(preview)} ₽",
+            f"⚙️ {difficulty}",
+            f"⏱️ {estimated} мин",
+        ]
         if getattr(o, "is_special", False):
             prefix = "✨"
             title = f"{RU.SPECIAL_ORDER_TITLE}: {o.title}"
-            suffix += " · награда ×2"
+            suffix_parts.append("⭐ награда ×2")
         if trend_order_id and o.id == trend_order_id:
             prefix = "🔥"
-            suffix += f" · награда ×{format_stat(trend_mul)}"
-        lines.append(f"{circled_number(i)} {prefix} {title} — {suffix}")
+            suffix_parts.append(f"🔥 ×{format_stat(trend_mul)}")
+        if rarity in {"rare", "holiday"}:
+            suffix_parts.append(ORDER_RARITY_TITLES.get(rarity, rarity))
+        lines.append(
+            f"{circled_number(i)} {prefix} {title}\n   "
+            + " · ".join(part for part in suffix_parts if part)
+        )
     return "\n".join(lines)
 
 
@@ -4179,7 +4450,8 @@ def fmt_orders(
 @safe_handler
 async def orders_root(message: Message, state: FSMContext):
     await state.set_state(OrdersState.browsing)
-    await state.update_data(page=0)
+    # Сбрасываем случайные заказы при новом заходе в раздел.
+    await state.update_data(page=0, rolled_rares=None)
     await _render_orders_page(message, state)
 
 
@@ -4216,8 +4488,22 @@ async def _render_orders_page(message: Message, state: FSMContext):
                 .order_by(Order.min_level, Order.id)
             )
         ).scalars().all()
+        data = await state.get_data()
+        rolled_rares: Optional[List[int]] = data.get("rolled_rares")  # type: ignore[arg-type]
+        if rolled_rares is None:
+            rolled_rares = []
+            for order in all_orders:
+                if order.rarity in {"rare", "holiday"}:
+                    chance = max(0.0, min(1.0, float(getattr(order, "appearance_weight", 0.0))))
+                    if chance > 0 and random.random() < chance:
+                        rolled_rares.append(order.id)
+            await state.update_data(rolled_rares=rolled_rares)
         special_orders = [o for o in all_orders if o.is_special]
-        regular_orders = [o for o in all_orders if not o.is_special]
+        regular_orders = [
+            o
+            for o in all_orders
+            if not o.is_special and (o.rarity == "common" or o.id in rolled_rares)
+        ]
         special_inserted = False
         trend_info = await get_trend(session)
         today = utcnow().date()
@@ -4230,12 +4516,16 @@ async def _render_orders_page(message: Message, state: FSMContext):
             if allow_special:
                 regular_orders = [special] + regular_orders
                 special_inserted = True
-        data = await state.get_data()
         page = int(data.get("page", 0))
         sub, has_prev, has_next = slice_page(regular_orders, page, 5)
         hint_needed = special_inserted and any(getattr(o, "is_special", False) for o in sub)
         await message.answer(
-            fmt_orders(sub, special_hint=hint_needed, trend=trend_info),
+            fmt_orders(
+                sub,
+                user_level=user.level,
+                special_hint=hint_needed,
+                trend=trend_info,
+            ),
             reply_markup=kb_numeric_page(has_prev, has_next),
         )
         await state.update_data(order_ids=[o.id for o in sub], page=page)
@@ -4318,9 +4608,12 @@ async def take_order(message: Message, state: FSMContext):
                 max(1, int(round(req * FREE_ORDER_PROGRESS_PCT))),
             )
             free_triggered = initial_progress > 0
+        order_mul = 1.0
+        if order:
+            order_mul = float(getattr(order, "reward_multiplier", 1.0))
         reward_snapshot = stats["reward_mul_total"] * (
             SPECIAL_ORDER_REWARD_MUL if is_special_order else 1.0
-        )
+        ) * order_mul
         trend_info = await get_trend(session)
         trend_applied = False
         trend_multiplier = 1.0
@@ -5281,6 +5574,10 @@ async def team_next(message: Message, state: FSMContext):
 @safe_handler
 async def team_upgrade(message: Message, state: FSMContext):
     mid = int((await state.get_data())["member_id"])
+    response_lines: List[str] = []
+    next_cost_preview: Optional[int] = None
+    member_name: Optional[str] = None
+    current_level: Optional[int] = None
     async with session_scope() as session:
         user = await ensure_user_loaded(session, message)
         if not user:
@@ -5294,6 +5591,7 @@ async def team_upgrade(message: Message, state: FSMContext):
             await state.set_state(TeamState.browsing)
             await render_team(message, state)
             return
+        member_name = member.name
         if user.level < member.min_level:
             await message.answer("Сначала достигните нужного уровня, чтобы работать с этим специалистом.")
             await state.set_state(TeamState.browsing)
@@ -5310,14 +5608,18 @@ async def team_upgrade(message: Message, state: FSMContext):
         )
         if user.balance < cost:
             await message.answer(RU.INSUFFICIENT_FUNDS)
+            current_level = lvl
+            next_cost_preview = cost
         else:
             now = utcnow()
             user.balance -= cost
             user.updated_at = now
             if not team_entry:
                 session.add(UserTeam(user_id=user.id, member_id=mid, level=1))
+                current_level = 1
             else:
                 team_entry.level += 1
+                current_level = team_entry.level
             session.add(
                 EconomyLog(
                     user_id=user.id,
@@ -5333,15 +5635,27 @@ async def team_upgrade(message: Message, state: FSMContext):
                     "tg_id": user.tg_id,
                     "user_id": user.id,
                     "member": member.code,
-                    "level": lvl + 1,
+                    "level": current_level,
                 },
             )
             await update_campaign_progress(session, user, "team_upgrade", {})
             await message.answer(RU.UPGRADE_OK)
             achievements.extend(await evaluate_achievements(session, user, {"team"}))
+            next_cost_preview = apply_percentage_discount(
+                member.base_cost * (1.22 ** current_level), discount_pct, cap=TEAM_DISCOUNT_CAP
+            )
         await notify_new_achievements(message, achievements)
-    await state.set_state(TeamState.browsing)
-    await render_team(message, state)
+    await state.set_state(TeamState.confirm)
+    await state.update_data(member_id=mid)
+    if member_name is not None and current_level is not None:
+        level_line = f"«{member_name}» — текущий уровень {current_level}."
+        response_lines.append(level_line)
+    if next_cost_preview:
+        response_lines.append(f"Следующее повышение обойдётся в {format_money(next_cost_preview)} ₽.")
+    if response_lines:
+        # Обновлено: оставляем игрока на карточке сотрудника для повторной прокачки.
+        response_lines.append("Нажмите «⚙️ Повысить» для продолжения или «Отмена» для выхода.")
+        await message.answer("\n".join(response_lines), reply_markup=kb_confirm(RU.BTN_UPGRADE))
 
 
 @router.message(TeamState.confirm, F.text == RU.BTN_CANCEL)
@@ -5565,28 +5879,32 @@ async def profile_show(message: Message, state: FSMContext):
         xp_bar = render_progress_bar(user.xp, xp_need)
         passive_per_min = format_money(rate * 60)
         rank = rank_for(user.level, prestige.reputation)
-        text = RU.PROFILE.format(
-            name=display_name,
-            lvl=user.level,
-            rank=rank,
-            xp=user.xp,
-            xp_need=xp_need,
-            xp_bar=xp_bar,
-            xp_pct=xp_pct,
-            rub=format_money(user.balance),
-            avg=format_money(avg_income),
-            cp=format_stat(stats["cp"]),
-            passive=f"{passive_per_min} ₽",
-            order=order_str,
-            buffs=buffs_text,
-            campaign=campaign_text,
-            rep=prestige.reputation,
-            referrals=user.referrals_count,
-        )
         shield_charges = stats.get("event_shield_charges", 0)
+        profile_lines = [
+            f"👤 {display_name}",
+            f"🏅 Ур. {user.level} · {rank}",
+            "",
+            "📊 Статистика",
+            # Обновлено: секции с короткими маркерами вместо сплошного полотна.
+            f"• XP: {user.xp}/{xp_need} {xp_bar} ({xp_pct}%)",
+            f"• Баланс: {format_money(user.balance)} ₽ · Ср. доход: {format_money(avg_income)} ₽",
+            f"• Сила клика: {format_stat(stats['cp'])} · Пассив: {passive_per_min} ₽/мин",
+            "",
+            "🎯 Прогресс",
+            f"• Заказ: {order_str}",
+            f"• Кампания: {campaign_text}",
+            f"• Репутация: {prestige.reputation}",
+            "",
+            "🤝 Сообщество",
+            f"• Баффы: {buffs_text}",
+            f"• Приглашено друзей: {user.referrals_count}",
+        ]
         if shield_charges > 0:
-            text = f"{text}\n{RU.PROFILE_SHIELD.format(charges=shield_charges)}"
-        await message.answer(text, reply_markup=kb_profile_menu(has_active_order=bool(active)))
+            profile_lines.append(f"• {RU.PROFILE_SHIELD.format(charges=shield_charges)}")
+        await message.answer(
+            "\n".join(profile_lines),
+            reply_markup=kb_profile_menu(has_active_order=bool(active)),
+        )
         if await tutorial_on_event(message, session, user, "profile_open"):
             await state.clear()
         await notify_new_achievements(message, achievements)
