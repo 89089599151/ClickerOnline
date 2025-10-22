@@ -3941,6 +3941,35 @@ async def fetch_user_average_income(session: AsyncSession, user_id: int) -> floa
 # Анти-флуд (middleware)
 # ----------------------------------------------------------------------------
 
+class TutorialGateMiddleware(BaseMiddleware):
+    """Block unrelated buttons during the guided tutorial."""
+
+    async def __call__(self, handler, event, data):
+        if not isinstance(event, Message):
+            return await handler(event, data)
+        if not event.from_user:
+            return await handler(event, data)
+        text = (event.text or "").strip()
+        if not text or text.startswith("/start"):
+            return await handler(event, data)
+        async with session_scope() as session:
+            user = await get_user_by_tg(session, event.from_user.id)
+            if (
+                not user
+                or user.tutorial_completed_at is not None
+                or user.tutorial_stage >= TUTORIAL_STAGE_DONE
+            ):
+                return await handler(event, data)
+            allowed = tutorial_allowed_buttons(user.tutorial_stage)
+            if text in allowed:
+                return await handler(event, data)
+            hint_button = TUTORIAL_STAGE_HINT_BUTTONS.get(
+                user.tutorial_stage, RU.BTN_TUTORIAL_NEXT
+            )
+        await event.answer(RU.TUTORIAL_LOCKED.format(button=hint_button))
+        return
+
+
 class RateLimiter:
     """Sliding-window rate limiter per Telegram user."""
 
@@ -4261,29 +4290,6 @@ async def tutorial_finish(message: Message, state: FSMContext):
         completed = await tutorial_on_event(message, session, user, "tutorial_complete")
     if completed:
         await state.clear()
-
-
-@router.message()
-@safe_handler
-async def tutorial_gatekeeper(message: Message, state: FSMContext):
-    if not message.from_user:
-        return
-    text = (message.text or "").strip()
-    if text.startswith("/start"):
-        return
-    async with session_scope() as session:
-        user = await get_user_by_tg(session, message.from_user.id)
-        if not user:
-            return
-        if user.tutorial_completed_at is not None or user.tutorial_stage >= TUTORIAL_STAGE_DONE:
-            return
-        stage = user.tutorial_stage
-        allowed = tutorial_allowed_buttons(stage)
-        if text in allowed:
-            return
-        hint_button = TUTORIAL_STAGE_HINT_BUTTONS.get(stage, RU.BTN_TUTORIAL_NEXT)
-        await message.answer(RU.TUTORIAL_LOCKED.format(button=hint_button))
-        return
 
 
 @router.callback_query(F.data.startswith("event_choice:"))
@@ -7193,7 +7199,8 @@ async def main() -> None:
     bot = Bot(SETTINGS.BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
-    # Middleware анти-флуда для всех сообщений (фактически ограничивает только кнопку «Клик»)
+    # Middleware обучения и анти-флуда
+    dp.message.middleware(TutorialGateMiddleware())
     dp.message.middleware(RateLimitMiddleware(get_user_click_limit))
 
     # Роутер
