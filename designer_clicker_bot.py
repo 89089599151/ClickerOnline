@@ -228,6 +228,12 @@ class RU:
     BTN_PROFILE_CAT_LONG_TERM = "🗺️ Долгосрочные цели"
     BTN_PROFILE_CAT_SOCIAL = "🤝 Сообщество"
 
+    PROFILE_CATEGORY_PROMPT = "Выберите раздел профиля:"
+    PROFILE_CATEGORY_PROMPT_STATS = "📊 Раздел «Статистика и задачи». Выберите действие:"
+    PROFILE_CATEGORY_PROMPT_PROGRESS = "🎯 Раздел «Прогресс». Чем займёмся?"
+    PROFILE_CATEGORY_PROMPT_LONG_TERM = "🗺️ Долгосрочные цели — выберите направление:"
+    PROFILE_CATEGORY_PROMPT_SOCIAL = "🤝 Сообщество — что хотите открыть?"
+
     # Общие
     BTN_MENU = "🏠 Меню"
     BTN_TO_MENU = "🏠 Перейти в меню"
@@ -245,6 +251,7 @@ class RU:
     BTN_CANCEL_ORDER = "🛑 Отменить заказ"
     BTN_BACK = "◀️ Назад"
     BTN_RETURN_ORDER = "🔙 Вернуться к заказу"
+    BTN_PROFILE_BACK = "◀️ Назад к разделам"
     BTN_HOME = "🏠 Меню"
     BTN_TUTORIAL_NEXT = "➡️ Далее"
     BTN_TUTORIAL_SKIP = "⏭️ Пропустить"
@@ -538,22 +545,41 @@ PROFILE_MENU_CATEGORY_LABELS: Set[str] = {
 }
 
 
-def kb_profile_menu(has_active_order: bool) -> ReplyKeyboardMarkup:
-    """Return profile keyboard grouped by category blocks with visual headers."""
+PROFILE_CATEGORY_LAYOUTS: Dict[str, List[List[str]]] = {
+    RU.BTN_PROFILE_CAT_STATS: [[RU.BTN_DAILY, RU.BTN_DAILIES]],
+    RU.BTN_PROFILE_CAT_PROGRESS: [[RU.BTN_SKILLS, RU.BTN_ACHIEVEMENTS]],
+    RU.BTN_PROFILE_CAT_LONG_TERM: [[RU.BTN_CAMPAIGN, RU.BTN_STUDIO]],
+    RU.BTN_PROFILE_CAT_SOCIAL: [[RU.BTN_REFERRAL, RU.BTN_STATS]],
+}
 
-    # Обновлено: добавлены явные заголовки категорий, чтобы сделать структуру понятнее.
+
+PROFILE_CATEGORY_PROMPTS: Dict[str, str] = {
+    RU.BTN_PROFILE_CAT_STATS: RU.PROFILE_CATEGORY_PROMPT_STATS,
+    RU.BTN_PROFILE_CAT_PROGRESS: RU.PROFILE_CATEGORY_PROMPT_PROGRESS,
+    RU.BTN_PROFILE_CAT_LONG_TERM: RU.PROFILE_CATEGORY_PROMPT_LONG_TERM,
+    RU.BTN_PROFILE_CAT_SOCIAL: RU.PROFILE_CATEGORY_PROMPT_SOCIAL,
+}
+
+
+def kb_profile_menu(
+    has_active_order: bool,
+    *,
+    category: Optional[str] = None,
+) -> ReplyKeyboardMarkup:
+    """Return profile keyboard either for root categories or a chosen subgroup."""
+
+    if category and category in PROFILE_CATEGORY_LAYOUTS:
+        rows = [list(row) for row in PROFILE_CATEGORY_LAYOUTS[category]]
+        if has_active_order:
+            rows.append([RU.BTN_RETURN_ORDER])
+        rows.append([RU.BTN_PROFILE_BACK])
+        return _reply_keyboard(rows)
+
     rows: List[List[str]] = [
-        [RU.BTN_PROFILE_CAT_STATS],
-        [RU.BTN_DAILY, RU.BTN_DAILIES],
-        [RU.BTN_PROFILE_CAT_PROGRESS],
-        [RU.BTN_SKILLS, RU.BTN_ACHIEVEMENTS],
-        [RU.BTN_PROFILE_CAT_LONG_TERM],
-        [RU.BTN_CAMPAIGN, RU.BTN_STUDIO],
-        [RU.BTN_PROFILE_CAT_SOCIAL],
-        [RU.BTN_REFERRAL, RU.BTN_STATS],
+        [RU.BTN_PROFILE_CAT_STATS, RU.BTN_PROFILE_CAT_PROGRESS],
+        [RU.BTN_PROFILE_CAT_LONG_TERM, RU.BTN_PROFILE_CAT_SOCIAL],
     ]
     if has_active_order:
-        # Под рукой оставляем возврат к заказу, чтобы быстрее переключаться.
         rows.append([RU.BTN_RETURN_ORDER])
     rows.append([RU.BTN_BACK])
     return _reply_keyboard(rows)
@@ -5929,7 +5955,25 @@ async def profile_show(message: Message, state: FSMContext):
 @router.message(F.text.in_(PROFILE_MENU_CATEGORY_LABELS))
 @safe_handler
 async def profile_category_header(message: Message, state: FSMContext):
-    """Handle taps on category headers by reminding user to pick an option."""
+    """Open a dedicated keyboard for the selected profile category."""
+
+    category = (message.text or "").strip()
+    async with session_scope() as session:
+        user = await ensure_user_loaded(session, message)
+        if not user:
+            return
+        active = await get_active_order(session, user)
+    prompt = PROFILE_CATEGORY_PROMPTS.get(category, RU.PROFILE_CATEGORY_PROMPT)
+    await message.answer(
+        prompt,
+        reply_markup=kb_profile_menu(has_active_order=bool(active), category=category),
+    )
+
+
+@router.message(F.text == RU.BTN_PROFILE_BACK)
+@safe_handler
+async def profile_back_to_categories(message: Message, state: FSMContext):
+    """Return to the root profile categories keyboard."""
 
     async with session_scope() as session:
         user = await ensure_user_loaded(session, message)
@@ -5937,7 +5981,7 @@ async def profile_category_header(message: Message, state: FSMContext):
             return
         active = await get_active_order(session, user)
     await message.answer(
-        "Это заголовок раздела. Выберите нужную кнопку ниже 👇",
+        RU.PROFILE_CATEGORY_PROMPT,
         reply_markup=kb_profile_menu(has_active_order=bool(active)),
     )
 
@@ -6012,7 +6056,10 @@ async def show_daily_tasks_menu(message: Message):
         if all_done:
             lines.append("")
             lines.append(RU.DAILIES_EMPTY)
-        markup = kb_profile_menu(has_active_order=bool(await get_active_order(session, user)))
+        markup = kb_profile_menu(
+            has_active_order=bool(await get_active_order(session, user)),
+            category=RU.BTN_PROFILE_CAT_STATS,
+        )
         await message.answer("\n".join(lines), reply_markup=markup)
         await notify_new_achievements(message, achievements)
 
@@ -6032,7 +6079,10 @@ async def show_referral_link(message: Message):
             link = f"https://t.me/{username}?start={message.from_user.id}"
         else:
             link = f"https://t.me/share/url?url={message.from_user.id}"
-        markup = kb_profile_menu(has_active_order=bool(await get_active_order(session, user)))
+        markup = kb_profile_menu(
+            has_active_order=bool(await get_active_order(session, user)),
+            category=RU.BTN_PROFILE_CAT_SOCIAL,
+        )
         await message.answer(
             RU.REFERRAL_INVITE.format(
                 link=link, rub=REFERRAL_BONUS_RUB, xp=REFERRAL_BONUS_XP
@@ -6237,7 +6287,10 @@ async def show_global_stats(message: Message):
         rows = await fetch_average_income_rows(session)
         active = await get_active_order(session, user)
         await notify_new_achievements(message, achievements)
-    markup = kb_profile_menu(has_active_order=bool(active))
+    markup = kb_profile_menu(
+        has_active_order=bool(active),
+        category=RU.BTN_PROFILE_CAT_SOCIAL,
+    )
     ordered = sorted(rows, key=lambda entry: entry[2], reverse=True)
     total_players = len(ordered)
     lines = [RU.STATS_HEADER, ""]
@@ -6282,7 +6335,10 @@ async def show_achievements(message: Message):
         ).all()
         active = await get_active_order(session, user)
         await notify_new_achievements(message, achievements_new)
-    markup = kb_profile_menu(has_active_order=bool(active))
+    markup = kb_profile_menu(
+        has_active_order=bool(active),
+        category=RU.BTN_PROFILE_CAT_PROGRESS,
+    )
     if not rows:
         await message.answer(RU.ACHIEVEMENTS_EMPTY, reply_markup=markup)
         return
@@ -6317,7 +6373,10 @@ async def show_campaign(message: Message, state: FSMContext):
         goal = definition.get("goal", {}) if definition else {}
         pct = int(campaign_goal_progress(goal, progress.progress or {}) * 100) if definition else 0
         min_level = definition.get("min_level", 1) if definition else 1
-        markup_profile = kb_profile_menu(has_active_order=bool(active))
+        markup_profile = kb_profile_menu(
+            has_active_order=bool(active),
+            category=RU.BTN_PROFILE_CAT_LONG_TERM,
+        )
         if not definition:
             await message.answer(RU.CAMPAIGN_EMPTY, reply_markup=markup_profile)
             return
@@ -6360,12 +6419,16 @@ async def claim_campaign_handler(message: Message, state: FSMContext):
             await message.answer(
                 RU.CAMPAIGN_EMPTY,
                 reply_markup=kb_profile_menu(
-                    has_active_order=bool(await get_active_order(session, user))
+                    has_active_order=bool(await get_active_order(session, user)),
+                    category=RU.BTN_PROFILE_CAT_LONG_TERM,
                 ),
             )
             return
         text, prev_level, levels_gained = result
-        markup = kb_profile_menu(has_active_order=bool(await get_active_order(session, user)))
+        markup = kb_profile_menu(
+            has_active_order=bool(await get_active_order(session, user)),
+            category=RU.BTN_PROFILE_CAT_LONG_TERM,
+        )
         await message.answer(text, reply_markup=markup)
         await maybe_prompt_skill_choice(session, message, state, user, prev_level, levels_gained)
         if levels_gained:
@@ -6383,7 +6446,10 @@ async def show_studio(message: Message, state: FSMContext):
         achievements: List[Tuple[Achievement, UserAchievement]] = []
         await process_offline_income(session, user, achievements)
         active = await get_active_order(session, user)
-        profile_markup = kb_profile_menu(has_active_order=bool(active))
+        profile_markup = kb_profile_menu(
+            has_active_order=bool(active),
+            category=RU.BTN_PROFILE_CAT_LONG_TERM,
+        )
         if user.level < 20:
             await message.answer(RU.STUDIO_LOCKED, reply_markup=profile_markup)
             return
@@ -6426,7 +6492,10 @@ async def confirm_studio(message: Message, state: FSMContext):
         total_earned = float(stored_total) if stored_total is not None else await calc_total_earned(session, user)
         gain = await calc_prestige_gain(session, user, total_earned=total_earned)
         await perform_prestige_reset(session, user, gain, total_earned)
-        markup = kb_profile_menu(has_active_order=bool(await get_active_order(session, user)))
+        markup = kb_profile_menu(
+            has_active_order=bool(await get_active_order(session, user)),
+            category=RU.BTN_PROFILE_CAT_LONG_TERM,
+        )
         await message.answer(RU.STUDIO_DONE.format(gain=gain), reply_markup=markup)
     await state.clear()
 
