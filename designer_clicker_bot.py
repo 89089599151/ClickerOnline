@@ -46,6 +46,7 @@ except Exception:
 
 # --- aiogram ---
 from aiogram import Bot, Dispatcher, Router, F, BaseMiddleware
+from aiogram.exceptions import SkipHandler
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -126,6 +127,7 @@ BOOST_COST_GROWTH = 1.6
 BOOST_CP_ADD_GROWTH = 1.45
 BOOSTS_PER_PAGE = 5
 BOOST_SELECTION_INPUTS = {str(i) for i in range(1, BOOSTS_PER_PAGE + 1)}
+FREE_UPGRADE_PRICE_LABEL = "0 ₽ (первый раз бесплатно)"
 
 # Доп. словари для витрины заказов.
 ORDER_DIFFICULTY_LABELS: Dict[str, str] = {
@@ -150,6 +152,12 @@ ORDER_RARITY_TITLES: Dict[str, str] = {
 class ComboTracker:
     bonus: float = 0.0
     last_ts: float = 0.0
+
+
+@dataclass
+class FreeShopOffer:
+    kind: Literal["boost", "item"]
+    target_id: int
 
 
 _combo_states: Dict[int, ComboTracker] = {}
@@ -255,6 +263,7 @@ class RU:
     BTN_HOME = "🏠 Меню"
     BTN_TUTORIAL_NEXT = "➡️ Далее"
     BTN_TUTORIAL_SKIP = "⏭️ Пропустить"
+    BTN_TUTORIAL_FINISH = "Готово"
     BTN_SHOW_ACHIEVEMENTS = "🏆 Посмотреть достижения"
     BTN_CAMPAIGN_CLAIM = "🎁 Забрать награду"
     BTN_STUDIO_CONFIRM = "✨ Открыть студию"
@@ -314,6 +323,8 @@ class RU:
     ACHIEVEMENTS_ENTRY = "{icon} {name} — {desc}"
     TUTORIAL_DONE = "🎓 Обучение завершено! Главное меню открыто — творим и зарабатываем."
     TUTORIAL_HINT = "⚡ Как будете готовы — нажмите «{button}» на клавиатуре ниже."
+    TUTORIAL_LOCKED = "Сейчас идёт обучение. Нажмите «{button}» для продолжения."
+    TUTORIAL_FREE_UPGRADE_DONE = "🎓 Первый апгрейд бесплатно оформлен! Эффект активирован."
     EVENT_POSITIVE = "{title}"
     EVENT_NEGATIVE = "{title}"
     EVENT_BUFF = "{title}"
@@ -370,30 +381,49 @@ class RU:
 
 # --- Дополнительные игровые константы ---
 
-TUTORIAL_STAGE_ORDER = 0
-TUTORIAL_STAGE_CLICKS = 1
-TUTORIAL_STAGE_UPGRADE = 2
-TUTORIAL_STAGE_PROFILE = 3
-TUTORIAL_STAGE_DONE = 4
+TUTORIAL_STAGE_INTRO = 0
+TUTORIAL_STAGE_GO_ORDERS = 1
+TUTORIAL_STAGE_ORDER_PICK = 2
+TUTORIAL_STAGE_CLICKS = 3
+TUTORIAL_STAGE_UPGRADES = 4
+TUTORIAL_STAGE_SHOP = 5
+TUTORIAL_STAGE_FINISH = 6
+TUTORIAL_STAGE_DONE = 7
 
 TUTORIAL_REQUIRED_CLICKS = 3
 
 TUTORIAL_STAGE_MESSAGES = {
-    TUTORIAL_STAGE_ORDER: (
-        "Привет, {name}! Я твой менеджер Ника. Мы только что открыли студию и нам нужен первый заказ."
-        "\nНажми «{orders}», выбери задачу и возьми её в работу."
+    TUTORIAL_STAGE_INTRO: (
+        "👋 Добро пожаловать! Предлагаю быстрый тур — освоишься за минуту.",
+    ),
+    TUTORIAL_STAGE_GO_ORDERS: (
+        "🎯 Цель игры — зарабатывать на дизайне. Начнём с заказа: нажми «{orders}».",
+    ),
+    TUTORIAL_STAGE_ORDER_PICK: (
+        "📋 Выбери любой бриф и подтверди «{take}», чтобы начать работу.",
     ),
     TUTORIAL_STAGE_CLICKS: (
-        "Есть заказ! Теперь кликай по кнопке «{click}», чтобы продвигать макет."
-        "\nСделай хотя бы {need} клика, я подскажу что дальше."
+        "🖱️ Жми «{click}», чтобы двигать прогресс. Сделай хотя бы {need} клика.",
     ),
-    TUTORIAL_STAGE_UPGRADE: (
-        "Отличный темп! Чтобы работать быстрее, загляни в «{upgrades}» и купи первое улучшение — любое, на что хватит средств."
+    TUTORIAL_STAGE_UPGRADES: (
+        "⚙️ Отлично! Теперь открой «{upgrades}» — покажу, как прокачиваться.",
     ),
-    TUTORIAL_STAGE_PROFILE: (
-        "Уже почти как профи. Открой «{profile}», чтобы посмотреть статистику и забрать ежедневный бонус."
-        "\nОн помогает собирать капитал каждый день!"
+    TUTORIAL_STAGE_SHOP: (
+        "🛒 Зайди в «{shop}» и возьми первый апгрейд. Сейчас он бесплатный!",
     ),
+    TUTORIAL_STAGE_FINISH: (
+        "✨ Все готово. Нажми «{finish}», чтобы завершить обучение.",
+    ),
+}
+
+TUTORIAL_STAGE_HINT_BUTTONS: Dict[int, str] = {
+    TUTORIAL_STAGE_INTRO: RU.BTN_TUTORIAL_NEXT,
+    TUTORIAL_STAGE_GO_ORDERS: RU.BTN_ORDERS,
+    TUTORIAL_STAGE_ORDER_PICK: RU.BTN_TAKE,
+    TUTORIAL_STAGE_CLICKS: RU.BTN_CLICK,
+    TUTORIAL_STAGE_UPGRADES: RU.BTN_UPGRADES,
+    TUTORIAL_STAGE_SHOP: RU.BTN_SHOP,
+    TUTORIAL_STAGE_FINISH: RU.BTN_TUTORIAL_FINISH,
 }
 
 CLICK_EXTRA_PHRASES = [
@@ -570,8 +600,6 @@ def kb_profile_menu(
 
     if category and category in PROFILE_CATEGORY_LAYOUTS:
         rows = [list(row) for row in PROFILE_CATEGORY_LAYOUTS[category]]
-        if has_active_order:
-            rows.append([RU.BTN_RETURN_ORDER])
         rows.append([RU.BTN_PROFILE_BACK])
         return _reply_keyboard(rows)
 
@@ -579,18 +607,27 @@ def kb_profile_menu(
         [RU.BTN_PROFILE_CAT_STATS, RU.BTN_PROFILE_CAT_PROGRESS],
         [RU.BTN_PROFILE_CAT_LONG_TERM, RU.BTN_PROFILE_CAT_SOCIAL],
     ]
-    if has_active_order:
-        rows.append([RU.BTN_RETURN_ORDER])
     rows.append([RU.BTN_BACK])
     return _reply_keyboard(rows)
 
 
-def kb_tutorial() -> ReplyKeyboardMarkup:
-    rows: List[List[str]] = [
-        [RU.BTN_ORDERS, RU.BTN_UPGRADES],
-        [RU.BTN_CLICK, RU.BTN_ACHIEVEMENTS],
-        [RU.BTN_TUTORIAL_SKIP, RU.BTN_BACK],
-    ]
+def tutorial_keyboard(stage: int) -> ReplyKeyboardMarkup:
+    """Return a minimal keyboard for the current tutorial stage."""
+
+    if stage == TUTORIAL_STAGE_INTRO:
+        rows = [[RU.BTN_TUTORIAL_NEXT, RU.BTN_TUTORIAL_SKIP]]
+    elif stage == TUTORIAL_STAGE_GO_ORDERS:
+        rows = [[RU.BTN_ORDERS], [RU.BTN_TUTORIAL_SKIP]]
+    elif stage == TUTORIAL_STAGE_CLICKS:
+        rows = [[RU.BTN_CLICK], [RU.BTN_TO_MENU], [RU.BTN_TUTORIAL_SKIP]]
+    elif stage == TUTORIAL_STAGE_UPGRADES:
+        rows = [[RU.BTN_UPGRADES], [RU.BTN_TUTORIAL_SKIP]]
+    elif stage == TUTORIAL_STAGE_SHOP:
+        rows = [[RU.BTN_SHOP], [RU.BTN_TUTORIAL_SKIP]]
+    elif stage == TUTORIAL_STAGE_FINISH:
+        rows = [[RU.BTN_TUTORIAL_FINISH]]
+    else:
+        rows = [[RU.BTN_TUTORIAL_SKIP]]
     return _reply_keyboard(rows)
 
 
@@ -666,25 +703,82 @@ def tutorial_stage_text(user: User, stage: int) -> Optional[str]:
     if not template:
         return None
     name = user.first_name or "дизайнер"
-    next_button = {
-        TUTORIAL_STAGE_ORDER: RU.BTN_ORDERS,
-        TUTORIAL_STAGE_CLICKS: RU.BTN_CLICK,
-        TUTORIAL_STAGE_UPGRADE: RU.BTN_UPGRADES,
-        TUTORIAL_STAGE_PROFILE: RU.BTN_PROFILE,
-    }.get(stage, RU.BTN_ORDERS)
-    return (
-        template.format(
-            name=name,
-            orders=RU.BTN_ORDERS,
-            click=RU.BTN_CLICK,
-            upgrades=RU.BTN_UPGRADES,
-            profile=RU.BTN_PROFILE,
-            need=TUTORIAL_REQUIRED_CLICKS,
-        )
-        + "\n\n"
-        + RU.TUTORIAL_HINT.format(button=next_button)
-        + "\nЕсли хочешь пропустить — нажми «Пропустить» ниже."
+    text = template.format(
+        name=name,
+        orders=RU.BTN_ORDERS,
+        click=RU.BTN_CLICK,
+        upgrades=RU.BTN_UPGRADES,
+        take=RU.BTN_TAKE,
+        shop=RU.BTN_SHOP,
+        finish=RU.BTN_TUTORIAL_FINISH,
+        need=TUTORIAL_REQUIRED_CLICKS,
     )
+    hint_button = TUTORIAL_STAGE_HINT_BUTTONS.get(stage)
+    lines = [text]
+    if hint_button:
+        lines.append("")
+        lines.append(RU.TUTORIAL_HINT.format(button=hint_button))
+    if stage < TUTORIAL_STAGE_FINISH:
+        lines.append("Если хочешь пропустить — нажми «Пропустить».")
+    return "\n".join(lines)
+
+
+def tutorial_allowed_buttons(stage: int) -> Set[str]:
+    """Return a set of reply buttons allowed for the current tutorial stage."""
+
+    allowed: Set[str] = {RU.BTN_TUTORIAL_SKIP}
+    if stage == TUTORIAL_STAGE_INTRO:
+        allowed.add(RU.BTN_TUTORIAL_NEXT)
+    elif stage == TUTORIAL_STAGE_GO_ORDERS:
+        allowed.add(RU.BTN_ORDERS)
+    elif stage == TUTORIAL_STAGE_ORDER_PICK:
+        allowed.update({
+            RU.BTN_ORDERS,
+            RU.BTN_TAKE,
+            RU.BTN_CANCEL,
+            RU.BTN_BACK,
+            RU.BTN_PREV,
+            RU.BTN_NEXT,
+            RU.BTN_TO_MENU,
+            RU.BTN_MENU,
+            RU.BTN_HOME,
+        })
+        allowed.update(str(i) for i in range(1, 6))
+    elif stage == TUTORIAL_STAGE_CLICKS:
+        allowed.update(
+            {
+                RU.BTN_CLICK,
+                RU.BTN_TO_MENU,
+                RU.BTN_MENU,
+                RU.BTN_HOME,
+                RU.BTN_RETURN_ORDER,
+                RU.BTN_BACK,
+            }
+        )
+    elif stage == TUTORIAL_STAGE_UPGRADES:
+        allowed.update({RU.BTN_UPGRADES, RU.BTN_MENU, RU.BTN_HOME})
+    elif stage == TUTORIAL_STAGE_SHOP:
+        allowed.update(
+            {
+                RU.BTN_SHOP,
+                RU.BTN_BOOSTS,
+                RU.BTN_EQUIPMENT,
+                RU.BTN_BACK,
+                RU.BTN_PREV,
+                RU.BTN_NEXT,
+                RU.BTN_BUY,
+                RU.BTN_CANCEL,
+                RU.BTN_MENU,
+                RU.BTN_HOME,
+                RU.BTN_TO_MENU,
+            }
+        )
+        allowed.update(BOOST_SELECTION_INPUTS)
+        allowed.update(str(i) for i in range(1, 6))
+        allowed.update(BOOST_CATEGORY_TEXTS)
+    elif stage == TUTORIAL_STAGE_FINISH:
+        allowed.add(RU.BTN_TUTORIAL_FINISH)
+    return allowed
 
 
 async def send_tutorial_prompt(message: Message, user: User, stage: int) -> None:
@@ -694,7 +788,7 @@ async def send_tutorial_prompt(message: Message, user: User, stage: int) -> None
     if not text:
         await message.answer(RU.TUTORIAL_DONE)
         return
-    await message.answer(text, reply_markup=kb_tutorial())
+    await message.answer(text, reply_markup=tutorial_keyboard(stage))
 
 
 async def tutorial_on_event(
@@ -708,42 +802,42 @@ async def tutorial_on_event(
     now = utcnow()
     stage = user.tutorial_stage
     advanced = False
-    completed = False
-    if stage == TUTORIAL_STAGE_ORDER and event == "order_taken":
+    if stage == TUTORIAL_STAGE_GO_ORDERS and event == "orders_opened":
+        user.tutorial_stage = TUTORIAL_STAGE_ORDER_PICK
+        advanced = True
+    elif stage == TUTORIAL_STAGE_ORDER_PICK and event == "order_taken":
+        payload["clicks"] = 0
         user.tutorial_stage = TUTORIAL_STAGE_CLICKS
         advanced = True
-        await send_tutorial_prompt(message, user, TUTORIAL_STAGE_CLICKS)
     elif stage == TUTORIAL_STAGE_CLICKS and event == "click":
         payload["clicks"] = int(payload.get("clicks", 0)) + 1
         if payload["clicks"] >= TUTORIAL_REQUIRED_CLICKS:
-            user.tutorial_stage = TUTORIAL_STAGE_UPGRADE
+            payload.pop("clicks", None)
+            user.tutorial_stage = TUTORIAL_STAGE_UPGRADES
             advanced = True
-            await send_tutorial_prompt(message, user, TUTORIAL_STAGE_UPGRADE)
-    elif stage == TUTORIAL_STAGE_UPGRADE and event == "upgrade_purchase":
-        user.tutorial_stage = TUTORIAL_STAGE_PROFILE
+    elif stage == TUTORIAL_STAGE_UPGRADES and event == "upgrades_open":
+        user.tutorial_stage = TUTORIAL_STAGE_SHOP
         advanced = True
-        await send_tutorial_prompt(message, user, TUTORIAL_STAGE_PROFILE)
-    elif stage == TUTORIAL_STAGE_PROFILE:
-        if event == "profile_open":
-            payload["profile_open"] = True
-        if event == "daily_claim":
-            payload["daily_claim"] = True
-        if payload.get("profile_open") and payload.get("daily_claim"):
-            user.tutorial_stage = TUTORIAL_STAGE_DONE
-            user.tutorial_completed_at = now
-            user.updated_at = now
-            payload.clear()
-            await message.answer(
-                RU.TUTORIAL_DONE,
-                reply_markup=await build_main_menu_markup(session=session, user=user),
-            )
-            completed = True
-            return True
-    if advanced:
-        payload.pop("clicks", None)
-    if advanced or stage == TUTORIAL_STAGE_PROFILE:
+    elif stage == TUTORIAL_STAGE_SHOP:
+        if event == "shop_open":
+            payload["shop_open"] = True
+        if event == "upgrade_purchase":
+            user.tutorial_stage = TUTORIAL_STAGE_FINISH
+            advanced = True
+    elif stage == TUTORIAL_STAGE_FINISH and event == "tutorial_complete":
+        user.tutorial_stage = TUTORIAL_STAGE_DONE
+        user.tutorial_completed_at = now
         user.updated_at = now
-    return completed
+        payload.clear()
+        await message.answer(
+            RU.TUTORIAL_DONE,
+            reply_markup=await build_main_menu_markup(session=session, user=user),
+        )
+        return True
+    if advanced:
+        user.updated_at = now
+        await send_tutorial_prompt(message, user, user.tutorial_stage)
+    return False
 
 
 def ensure_daily_task_state(user: User) -> Dict[str, Any]:
@@ -934,6 +1028,7 @@ class User(Base):
     tutorial_stage: Mapped[int] = mapped_column(Integer, default=0)
     tutorial_completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
     tutorial_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    tutorial_free_boost_used: Mapped[bool] = mapped_column(Boolean, default=False)
     clicks_total: Mapped[int] = mapped_column(Integer, default=0)
     orders_completed: Mapped[int] = mapped_column(Integer, default=0)
     passive_income_collected: Mapped[int] = mapped_column(Integer, default=0)
@@ -1248,6 +1343,10 @@ async def ensure_schema(session: AsyncSession) -> None:
         await session.execute(text("ALTER TABLE users ADD COLUMN tutorial_completed_at DATETIME"))
     if "tutorial_payload" not in user_columns:
         await session.execute(text("ALTER TABLE users ADD COLUMN tutorial_payload JSON DEFAULT '{}'"))
+    if "tutorial_free_boost_used" not in user_columns:
+        await session.execute(
+            text("ALTER TABLE users ADD COLUMN tutorial_free_boost_used BOOLEAN NOT NULL DEFAULT 0")
+        )
     if "clicks_total" not in user_columns:
         await session.execute(text("ALTER TABLE users ADD COLUMN clicks_total INTEGER NOT NULL DEFAULT 0"))
     if "orders_completed" not in user_columns:
@@ -3465,6 +3564,7 @@ async def perform_prestige_reset(
     user.orders_completed = 0
     user.clicks_total = 0
     user.passive_income_collected = 0
+    user.tutorial_free_boost_used = False
     user.updated_at = now
     await session.execute(delete(UserBoost).where(UserBoost.user_id == user.id))
     await session.execute(delete(UserTeam).where(UserTeam.user_id == user.id))
@@ -4105,6 +4205,23 @@ async def cmd_start(message: Message, state: FSMContext):
         await state.clear()
 
 
+@router.message(F.text == RU.BTN_TUTORIAL_NEXT)
+@safe_handler
+async def tutorial_next_step(message: Message, state: FSMContext):
+    async with session_scope() as session:
+        user = await ensure_user_loaded(session, message)
+        if not user:
+            await state.clear()
+            return
+        if user.tutorial_completed_at is not None or user.tutorial_stage >= TUTORIAL_STAGE_DONE:
+            return
+        if user.tutorial_stage <= TUTORIAL_STAGE_INTRO:
+            user.tutorial_stage = TUTORIAL_STAGE_GO_ORDERS
+            user.updated_at = utcnow()
+            await state.set_state(TutorialState.step)
+            await send_tutorial_prompt(message, user, user.tutorial_stage)
+
+
 @router.message(F.text == RU.BTN_TUTORIAL_SKIP)
 @safe_handler
 async def tutorial_skip(message: Message, state: FSMContext):
@@ -4121,6 +4238,42 @@ async def tutorial_skip(message: Message, state: FSMContext):
         RU.TUTORIAL_DONE,
         reply_markup=await build_main_menu_markup(tg_id=message.from_user.id),
     )
+
+
+@router.message(F.text == RU.BTN_TUTORIAL_FINISH)
+@safe_handler
+async def tutorial_finish(message: Message, state: FSMContext):
+    async with session_scope() as session:
+        user = await ensure_user_loaded(session, message)
+        if not user:
+            await state.clear()
+            return
+        completed = await tutorial_on_event(message, session, user, "tutorial_complete")
+    if completed:
+        await state.clear()
+
+
+@router.message()
+@safe_handler
+async def tutorial_gatekeeper(message: Message, state: FSMContext):
+    if not message.from_user:
+        return
+    text = (message.text or "").strip()
+    if text.startswith("/start"):
+        return
+    async with session_scope() as session:
+        user = await get_user_by_tg(session, message.from_user.id)
+        if not user:
+            return
+        if user.tutorial_completed_at is not None or user.tutorial_stage >= TUTORIAL_STAGE_DONE:
+            return
+        stage = user.tutorial_stage
+        allowed = tutorial_allowed_buttons(stage)
+        if text in allowed:
+            return
+        hint_button = TUTORIAL_STAGE_HINT_BUTTONS.get(stage, RU.BTN_TUTORIAL_NEXT)
+        await message.answer(RU.TUTORIAL_LOCKED.format(button=hint_button))
+    raise SkipHandler
 
 
 @router.callback_query(F.data.startswith("event_choice:"))
@@ -4495,6 +4648,10 @@ async def orders_root(message: Message, state: FSMContext):
     # Сбрасываем случайные заказы при новом заходе в раздел.
     await state.update_data(page=0, rolled_rares=None)
     await _render_orders_page(message, state)
+    async with session_scope() as session:
+        user = await ensure_user_loaded(session, message)
+        if user:
+            await tutorial_on_event(message, session, user, "orders_opened")
 
 
 @router.message(F.text == RU.BTN_UPGRADES)
@@ -4508,6 +4665,7 @@ async def upgrades_root(message: Message, state: FSMContext):
         achievements: List[Tuple[Achievement, UserAchievement]] = []
         await process_offline_income(session, user, achievements)
         include_team = user.level >= 2
+        await tutorial_on_event(message, session, user, "upgrades_open")
         await notify_new_achievements(message, achievements)
     await message.answer(
         RU.UPGRADES_HEADER,
@@ -4714,6 +4872,10 @@ async def take_cancel(message: Message, state: FSMContext):
 async def shop_root(message: Message, state: FSMContext):
     await state.set_state(ShopState.root)
     await message.answer(RU.SHOP_HEADER, reply_markup=kb_shop_menu())
+    async with session_scope() as session:
+        user = await ensure_user_loaded(session, message)
+        if user:
+            await tutorial_on_event(message, session, user, "shop_open")
 
 
 BOOST_TYPE_META: Dict[str, Tuple[str, str, str]] = {
@@ -4924,12 +5086,78 @@ def _item_icon(item: Item) -> str:
     return ITEM_SLOT_EMOJI.get(item.slot, "🎁")
 
 
+async def resolve_free_shop_offer(
+    session: AsyncSession,
+    user: User,
+    *,
+    boosts: Optional[List[Boost]] = None,
+    boost_levels: Optional[Dict[int, int]] = None,
+    items: Optional[List[Item]] = None,
+    stats: Optional[Dict[str, Any]] = None,
+) -> Optional[FreeShopOffer]:
+    """Determine the cheapest boost or item eligible for a free tutorial purchase."""
+
+    if user.tutorial_free_boost_used:
+        return None
+
+    if stats is None:
+        stats = await get_user_stats(session, user)
+    discount_pct = stats.get("shop_discount_pct", 0.0)
+
+    if boosts is None:
+        boosts = (await session.execute(select(Boost).order_by(Boost.base_cost))).scalars().all()
+    if boost_levels is None:
+        boost_levels = {
+            boost_id: level
+            for boost_id, level in (
+                await session.execute(
+                    select(UserBoost.boost_id, UserBoost.level).where(UserBoost.user_id == user.id)
+                )
+            ).all()
+        }
+
+    candidate: Optional[Tuple[str, int, float]] = None
+    for boost in boosts:
+        min_level = getattr(boost, "min_level", 1) or 1
+        if user.level < min_level:
+            continue
+        current_level = boost_levels.get(boost.id, 0)
+        if current_level > 0:
+            continue
+        cost = float(upgrade_cost(boost.base_cost, boost.growth, 1))
+        if candidate is None or cost < candidate[2] or (cost == candidate[2] and candidate[0] == "item"):
+            candidate = ("boost", boost.id, cost)
+
+    owned_items: Set[int] = {
+        row[0]
+        for row in (
+            await session.execute(select(UserItem.item_id).where(UserItem.user_id == user.id))
+        ).all()
+    }
+    if items is None:
+        items = await get_next_items_for_user(session, user)
+
+    for item in items:
+        min_level = getattr(item, "min_level", 1) or 1
+        if user.level < min_level or item.id in owned_items:
+            continue
+        price = float(apply_percentage_discount(item.price, discount_pct, cap=SHOP_DISCOUNT_CAP))
+        if candidate is None or price < candidate[2] or (price == candidate[2] and candidate[0] == "boost"):
+            candidate = ("item", item.id, price)
+
+    if candidate:
+        return FreeShopOffer(kind=candidate[0], target_id=candidate[1])
+    return None
+
+
 def fmt_boosts(
     user: User,
     boosts: List[Boost],
     levels: Dict[int, int],
     page: int,
     page_size: int = 5,
+    *,
+    free_offer: Optional[FreeShopOffer] = None,
 ) -> Tuple[str, List[int]]:
     """Compose a formatted boost list and return text along with selectable boost ids."""
 
@@ -4943,7 +5171,15 @@ def fmt_boosts(
         next_level = current_level + 1
         min_level = getattr(boost, "min_level", 1) or 1
         next_bonus = _boost_effect_for_level(boost, next_level)
-        cost = format_price(upgrade_cost(boost.base_cost, boost.growth, next_level))
+        cost_value = upgrade_cost(boost.base_cost, boost.growth, next_level)
+        is_free_candidate = (
+            free_offer is not None
+            and free_offer.kind == "boost"
+            and free_offer.target_id == boost.id
+            and not user.tutorial_free_boost_used
+            and next_level == 1
+        )
+        cost = FREE_UPGRADE_PRICE_LABEL if is_free_candidate else format_price(cost_value)
         extra = BOOST_EXTRA_META.get(boost.code, {})
         permanent = extra.get("permanent")
         if permanent is None:
@@ -4972,7 +5208,12 @@ def fmt_boosts(
 
 
 def format_boost_purchase_prompt(
-    boost: Boost, current_level: int, next_level: int, cost: int
+    boost: Boost,
+    current_level: int,
+    next_level: int,
+    cost: int,
+    *,
+    free_available: bool = False,
 ) -> str:
     """Pretty confirmation text for a boost upgrade purchase."""
 
@@ -4989,8 +5230,12 @@ def format_boost_purchase_prompt(
         current_line,
         f"После покупки: {next_level} — {next_effect}",
         f"Бонус за уровень: {step_effect}",
-        f"Стоимость: {format_price(cost)}",
     ]
+    if free_available:
+        parts.append(f"Стоимость: {FREE_UPGRADE_PRICE_LABEL}")
+        parts.append("🎓 Первый апгрейд оформляется без списания монет.")
+    else:
+        parts.append(f"Стоимость: {format_price(cost)}")
     flavor = BOOST_EXTRA_META.get(boost.code, {}).get("flavor")
     if flavor:
         parts.append(flavor)
@@ -4998,16 +5243,22 @@ def format_boost_purchase_prompt(
     return "\n".join(parts)
 
 
-def format_item_purchase_prompt(item: Item, price: int) -> str:
+def format_item_purchase_prompt(
+    item: Item, price: int, *, free_available: bool = False
+) -> str:
     """Pretty confirmation text for buying an equipment piece."""
 
     icon = _item_icon(item)
     effect = _format_item_effect(item)
-    return (
-        f"{icon} Покупка «{item.name}»\n"
-        f"Эффект: {effect}\n"
-        f"Цена: {format_price(price)}"
-    )
+    price_text = FREE_UPGRADE_PRICE_LABEL if free_available else format_price(price)
+    lines = [
+        f"{icon} Покупка «{item.name}»",
+        f"Эффект: {effect}",
+        f"Цена: {price_text}",
+    ]
+    if free_available:
+        lines.append("🎓 Первый апгрейд оформляется без списания монет.")
+    return "\n".join(lines)
 
 
 def format_item_equip_prompt(item: Item, current_equipped: Optional[Item] = None) -> str:
@@ -5052,6 +5303,7 @@ async def render_boosts(
             return
         achievements: List[Tuple[Achievement, UserAchievement]] = []
         await process_offline_income(session, user, achievements)
+        stats = await get_user_stats(session, user)
         boosts = (
             await session.execute(select(Boost).order_by(Boost.id))
         ).scalars().all()
@@ -5101,8 +5353,15 @@ async def render_boosts(
         if page >= total_pages:
             page = max(0, total_pages - 1)
         sub, has_prev, has_next = slice_page(category_boosts, page, BOOSTS_PER_PAGE)
+        free_offer = await resolve_free_shop_offer(
+            session,
+            user,
+            boosts=boosts,
+            boost_levels=levels,
+            stats=stats,
+        )
         text_body, selectable = fmt_boosts(
-            user, sub, levels, page, page_size=BOOSTS_PER_PAGE
+            user, sub, levels, page, page_size=BOOSTS_PER_PAGE, free_offer=free_offer
         )
         meta = BOOST_CATEGORY_META.get(
             category, {"icon": "✨", "label": category.title()}
@@ -5162,11 +5421,20 @@ async def _handle_boost_selection(
         )
         lvl_next = (user_boost.level if user_boost else 0) + 1
         cost = upgrade_cost(boost.base_cost, boost.growth, lvl_next)
+        free_offer = await resolve_free_shop_offer(session, user)
+        free_available = (
+            free_offer is not None
+            and free_offer.kind == "boost"
+            and free_offer.target_id == boost_id
+            and not user.tutorial_free_boost_used
+            and lvl_next == 1
+        )
         prompt = format_boost_purchase_prompt(
             boost,
             user_boost.level if user_boost else 0,
             lvl_next,
             cost,
+            free_available=free_available,
         )
         await message.answer(prompt, reply_markup=kb_confirm(RU.BTN_BUY))
         await state.set_state(ShopState.confirm_boost)
@@ -5258,11 +5526,23 @@ async def shop_buy_boost(message: Message, state: FSMContext):
         )
         lvl_next = (user_boost.level if user_boost else 0) + 1
         cost = upgrade_cost(boost.base_cost, boost.growth, lvl_next)
-        if user.balance < cost:
+        free_offer = await resolve_free_shop_offer(session, user)
+        free_available = (
+            free_offer is not None
+            and free_offer.kind == "boost"
+            and free_offer.target_id == bid
+            and not user.tutorial_free_boost_used
+            and lvl_next == 1
+        )
+        if not free_available and user.balance < cost:
             await message.answer(RU.INSUFFICIENT_FUNDS)
         else:
             now = utcnow()
-            user.balance -= cost
+            actual_cost = 0 if free_available else cost
+            if not free_available:
+                user.balance -= cost
+            else:
+                user.tutorial_free_boost_used = True
             user.updated_at = now
             if not user_boost:
                 session.add(UserBoost(user_id=user.id, boost_id=bid, level=1))
@@ -5272,8 +5552,12 @@ async def shop_buy_boost(message: Message, state: FSMContext):
                 EconomyLog(
                     user_id=user.id,
                     type="buy_boost",
-                    amount=-cost,
-                    meta={"boost": boost.code, "lvl": lvl_next},
+                    amount=-actual_cost,
+                    meta={
+                        "boost": boost.code,
+                        "lvl": lvl_next,
+                        **({"tutorial_free": True} if free_available else {}),
+                    },
                     created_at=now,
                 )
             )
@@ -5284,9 +5568,13 @@ async def shop_buy_boost(message: Message, state: FSMContext):
                     "user_id": user.id,
                     "boost": boost.code,
                     "level": lvl_next,
+                    "tutorial_free": free_available,
                 },
             )
-            await message.answer(RU.PURCHASE_OK)
+            if free_available:
+                await message.answer(RU.TUTORIAL_FREE_UPGRADE_DONE)
+            else:
+                await message.answer(RU.PURCHASE_OK)
             feedback = BOOST_PURCHASE_FEEDBACK.get(boost.type)
             if feedback:
                 await message.answer(feedback)
@@ -5314,6 +5602,7 @@ def fmt_items(
     include_price: bool = True,
     discount_pct: float = 0.0,
     equipped_ids: Optional[Set[int]] = None,
+    free_offer: Optional[FreeShopOffer] = None,
 ) -> str:
     """Format equipment listings with balance, icons and effects."""
 
@@ -5337,7 +5626,14 @@ def fmt_items(
             price = it.price
             if discount_pct > 0:
                 price = apply_percentage_discount(price, discount_pct, cap=SHOP_DISCOUNT_CAP)
-            entry = f"{entry} · {format_price(price)}"
+            is_free_candidate = (
+                free_offer is not None
+                and free_offer.kind == "item"
+                and free_offer.target_id == it.id
+                and not user.tutorial_free_boost_used
+            )
+            price_text = FREE_UPGRADE_PRICE_LABEL if is_free_candidate else format_price(price)
+            entry = f"{entry} · {price_text}"
         lines.append(entry)
     return "\n".join(lines)
 
@@ -5352,6 +5648,9 @@ async def render_items(message: Message, state: FSMContext):
         await process_offline_income(session, user, achievements)
         stats = await get_user_stats(session, user)
         items = await get_next_items_for_user(session, user)
+        free_offer = await resolve_free_shop_offer(
+            session, user, items=items, stats=stats
+        )
         page = int((await state.get_data()).get("page", 0))
         sub, has_prev, has_next = slice_page(items, page, 5)
         await message.answer(
@@ -5361,6 +5660,7 @@ async def render_items(message: Message, state: FSMContext):
                 page,
                 include_price=True,
                 discount_pct=stats.get("shop_discount_pct", 0.0),
+                free_offer=free_offer,
             ),
             reply_markup=kb_numeric_page(has_prev, has_next),
         )
@@ -5397,7 +5697,14 @@ async def shop_choose_item(message: Message, state: FSMContext):
         stats = await get_user_stats(session, user)
         discount_pct = stats.get("shop_discount_pct", 0.0)
         price = apply_percentage_discount(it.price, discount_pct, cap=SHOP_DISCOUNT_CAP)
-        prompt = format_item_purchase_prompt(it, price)
+        free_offer = await resolve_free_shop_offer(session, user, stats=stats)
+        free_available = (
+            free_offer is not None
+            and free_offer.kind == "item"
+            and free_offer.target_id == item_id
+            and not user.tutorial_free_boost_used
+        )
+        prompt = format_item_purchase_prompt(it, price, free_available=free_available)
         await message.answer(prompt, reply_markup=kb_confirm(RU.BTN_BUY))
     await state.set_state(ShopState.confirm_item)
     await state.update_data(item_id=item_id)
@@ -5442,27 +5749,46 @@ async def shop_buy_item(message: Message, state: FSMContext):
         has = await session.scalar(
             select(UserItem).where(UserItem.user_id == user.id, UserItem.item_id == item_id)
         )
+        free_offer = await resolve_free_shop_offer(session, user, stats=stats)
+        free_available = (
+            free_offer is not None
+            and free_offer.kind == "item"
+            and free_offer.target_id == item_id
+            and not user.tutorial_free_boost_used
+        )
         if has:
             await message.answer("Уже куплено.")
-        elif user.balance < price:
+        elif not free_available and user.balance < price:
             await message.answer(RU.INSUFFICIENT_FUNDS)
         else:
             now = utcnow()
-            user.balance -= price
+            actual_price = 0 if free_available else price
+            if not free_available:
+                user.balance -= price
+            else:
+                user.tutorial_free_boost_used = True
             user.updated_at = now
             session.add(UserItem(user_id=user.id, item_id=item_id))
             session.add(
                 EconomyLog(
                     user_id=user.id,
                     type="buy_item",
-                    amount=-price,
-                    meta={"item": item.code},
+                    amount=-actual_price,
+                    meta={
+                        "item": item.code,
+                        **({"tutorial_free": True} if free_available else {}),
+                    },
                     created_at=now,
                 )
             )
             logger.info(
                 "Item purchased",
-                extra={"tg_id": user.tg_id, "user_id": user.id, "item": item.code},
+                extra={
+                    "tg_id": user.tg_id,
+                    "user_id": user.id,
+                    "item": item.code,
+                    "tutorial_free": free_available,
+                },
             )
             await update_campaign_progress(session, user, "item_purchase", {})
             achievements.extend(await evaluate_achievements(session, user, {"items"}))
@@ -5482,7 +5808,8 @@ async def shop_buy_item(message: Message, state: FSMContext):
                 next_hint = (
                     f"Следующий уровень (по формуле): {format_price(proj_price)}, {bonus_str}."
                 )
-            await message.answer(f"{RU.PURCHASE_OK}\n{next_hint}")
+            main_text = RU.TUTORIAL_FREE_UPGRADE_DONE if free_available else RU.PURCHASE_OK
+            await message.answer(f"{main_text}\n{next_hint}")
             await daily_task_on_event(message, session, user, "daily_shop")
             await tutorial_on_event(message, session, user, "upgrade_purchase")
         await notify_new_achievements(message, achievements)
