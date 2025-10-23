@@ -79,6 +79,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -998,9 +999,15 @@ async def daily_task_on_event(
     entry = state.setdefault(task_code, {"progress": 0, "done": False})
     if entry.get("done"):
         return
-    entry["progress"] = min(task_def["goal"], int(entry.get("progress", 0)) + amount)
+    modified = False
+    current_progress = int(entry.get("progress", 0))
+    new_progress = min(task_def["goal"], current_progress + amount)
+    if new_progress != current_progress:
+        entry["progress"] = new_progress
+        modified = True
     if entry["progress"] >= task_def["goal"] and not entry.get("done"):
         entry["done"] = True
+        modified = True
         reward = task_def.get("reward", {})
         rub = int(reward.get("rub", 0))
         xp_reward = int(reward.get("xp", 0))
@@ -1027,6 +1034,8 @@ async def daily_task_on_event(
         )
         if levels_gained:
             await notify_level_up_message(message, session, user, prev_level, levels_gained)
+    if modified:
+        flag_modified(user, "daily_task_state")
 
 
 async def notify_level_up_message(
