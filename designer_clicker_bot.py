@@ -4196,11 +4196,7 @@ class TutorialGateMiddleware(BaseMiddleware):
             return await handler(event, data)
         async with session_scope() as session:
             user = await get_user_by_tg(session, event.from_user.id)
-            if (
-                not user
-                or user.tutorial_completed_at is not None
-                or user.tutorial_stage >= TUTORIAL_STAGE_DONE
-            ):
+            if not user or not is_tutorial_active(user):
                 return await handler(event, data)
             allowed = tutorial_allowed_buttons(user.tutorial_stage)
             if text in allowed:
@@ -4519,6 +4515,9 @@ async def tutorial_skip(message: Message, state: FSMContext):
         user.tutorial_stage = TUTORIAL_STAGE_DONE
         user.tutorial_completed_at = utcnow()
         user.updated_at = utcnow()
+        user.tutorial_payload = {}
+        session.add(user)
+        await session.flush()
     await state.clear()
     await message.answer(
         RU.TUTORIAL_DONE,
