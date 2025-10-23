@@ -192,6 +192,93 @@ ORDER_DESCRIPTIONS: Dict[str, str] = {
 }
 
 
+# Источники пассивного дохода: значения собраны в одном месте для быстрой балансировки.
+PASSIVE_SOURCES: List[Dict[str, Any]] = [
+    {
+        "code": "bank_deposit",
+        "title": "🏦 Банковский вклад",
+        "min_level": 2,
+        "income_per_min": 2,
+        "price": 500,
+        "description": "Пусть проценты капают, пока ты отдыхаешь.",
+    },
+    {
+        "code": "tech_rental",
+        "title": "💻 Аренда техники",
+        "min_level": 5,
+        "income_per_min": 5,
+        "price": 1_500,
+        "description": "Отдай ноутбук в аренду — пусть работает за тебя.",
+    },
+    {
+        "code": "dividend_stocks",
+        "title": "📊 Дивидендные акции",
+        "min_level": 6,
+        "income_per_min": 8,
+        "price": 3_000,
+        "description": "Инвестируй в успех крупных компаний.",
+    },
+    {
+        "code": "royalty_income",
+        "title": "🎵 Авторские отчисления",
+        "min_level": 8,
+        "income_per_min": 10,
+        "price": 4_500,
+        "description": "Однажды создал — теперь получай роялти вечно.",
+    },
+    {
+        "code": "car_rental",
+        "title": "🚗 Сдача автомобиля",
+        "min_level": 10,
+        "income_per_min": 15,
+        "price": 8_000,
+        "description": "Пусть твоя машина работает вместо тебя.",
+    },
+    {
+        "code": "coffee_kiosk",
+        "title": "☕ Мини-бизнес (ларёк)",
+        "min_level": 12,
+        "income_per_min": 20,
+        "price": 12_000,
+        "description": "Малый бизнес — стабильная прибыль каждый день.",
+    },
+    {
+        "code": "property_rent",
+        "title": "🏠 Аренда недвижимости",
+        "min_level": 14,
+        "income_per_min": 30,
+        "price": 18_000,
+        "description": "Сдавай жильё и получай гарантированный доход.",
+    },
+    {
+        "code": "crypto_mining",
+        "title": "💰 Крипто-майнинг",
+        "min_level": 16,
+        "income_per_min": 35,
+        "price": 25_000,
+        "description": "Твоя ферма печатает деньги, пока ты отдыхаешь.",
+    },
+    {
+        "code": "startup_investment",
+        "title": "🚀 Инвестиция в стартап",
+        "min_level": 18,
+        "income_per_min": 50,
+        "price": 40_000,
+        "description": "Поддержи идею — и получай долю от успеха.",
+    },
+    {
+        "code": "franchise_network",
+        "title": "🏪 Франшиза (сеть предприятий)",
+        "min_level": 20,
+        "income_per_min": 70,
+        "price": 65_000,
+        "description": "Стань владельцем сети и наслаждайся стабильным потоком ₽.",
+    },
+]
+
+PASSIVE_SOURCE_BY_CODE = {source["code"]: source for source in PASSIVE_SOURCES}
+
+
 @dataclass
 class FreeShopOffer:
     kind: Literal["boost", "item"]
@@ -366,6 +453,13 @@ class RU:
         "🏢 Репутация: {rep}\n"
         "🤝 Приглашено друзей: {referrals}"
     )
+    PASSIVE_HEADER = "💤 Источники пассивного дохода"
+    PASSIVE_PURCHASE_HINT = "Чтобы купить источник, отправьте /buy_passive <номер>."
+    PASSIVE_ALREADY = "✅ Этот источник уже куплен."
+    PASSIVE_LOCKED = "🔒 Источник откроется с {lvl} уровня."
+    PASSIVE_USAGE = "Укажите номер источника: /buy_passive <номер>."
+    PASSIVE_UNKNOWN = "Источник с таким номером не найден."
+    PASSIVE_PURCHASED = "💤 Источник «{name}» теперь приносит +{income} ₽/мин."
     PROFILE_SHIELD = "🛡️ Защита: {charges}"
     TEAM_HEADER = "👥 Команда (прогресс/мин, уровень, цена повышения):"
     TEAM_LOCKED = "👥 Команда откроется со 2 уровня."
@@ -1264,6 +1358,18 @@ class UserTeam(Base):
     level: Mapped[int] = mapped_column(Integer, default=0)  # 0 — не нанят
 
     __table_args__ = (UniqueConstraint("user_id", "member_id", name="uq_user_team"),)
+
+
+class UserPassiveSource(Base):
+    __tablename__ = "user_passive_sources"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    source_code: Mapped[str] = mapped_column(String(50))
+    level: Mapped[int] = mapped_column(Integer, default=1)  # уровни пригодятся, когда появятся апгрейды
+    purchased_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (UniqueConstraint("user_id", "source_code", name="uq_user_passive_source"),)
 
 
 class Item(Base):
@@ -2711,7 +2817,27 @@ def is_night_now(now: Optional[datetime] = None) -> bool:
 async def calc_passive_income_rate(session: AsyncSession, user: User, stats: Dict[str, Any]) -> float:
     """Return passive income in currency per second accounting for multipliers."""
 
-    return await calc_team_progress_rate(session, user, stats)
+    rows = (
+        await session.execute(
+            select(UserPassiveSource.source_code, UserPassiveSource.level)
+            .where(UserPassiveSource.user_id == user.id)
+            .order_by(UserPassiveSource.id)
+        )
+    ).all()
+    per_min = 0.0
+    for code, level in rows:
+        source = PASSIVE_SOURCE_BY_CODE.get(code)
+        if not source:
+            continue
+        base_income = float(source.get("income_per_min", 0))
+        lvl = max(1, level or 1)
+        per_min += base_income * lvl
+    passive_mul_total = stats.get("passive_mul_total", 1.0)
+    rate = (per_min / 60.0) * passive_mul_total
+    night_bonus = stats.get("night_passive_pct", 0.0)
+    if night_bonus > 0 and is_night_now():
+        rate *= 1.0 + night_bonus
+    return rate
 
 
 async def calc_team_progress_rate(session: AsyncSession, user: User, stats: Dict[str, Any]) -> float:
@@ -5963,6 +6089,125 @@ async def shop_buy_item(message: Message, state: FSMContext):
 async def shop_cancel_item(message: Message, state: FSMContext):
     await state.set_state(ShopState.equipment)
     await render_items(message, state)
+
+
+# --- Пассивный доход ---
+
+def render_passive_sources(owned: Dict[str, int]) -> str:
+    """Return formatted list of passive income sources with purchase markers."""
+
+    entries: List[str] = []
+    for idx, source in enumerate(PASSIVE_SOURCES, 1):
+        income = f"{format_money(source['income_per_min'])}{RU.CURRENCY}/мин"
+        price = f"{format_money(source['price'])}{RU.CURRENCY}"
+        lines = [
+            f"{idx}. {source['title']}",
+            f"📈 Мин. уровень: {source['min_level']} 💰 Доход: {income} 💵 Цена: {price}",
+            source['description'],
+        ]
+        level_owned = owned.get(source["code"])
+        if level_owned:
+            lines.append(f"✅ Куплено (ур. {level_owned})")
+        entries.append("\n".join(lines))
+    body = "\n\n".join(entries)
+    return f"{RU.PASSIVE_HEADER}\n\n{body}\n\n{RU.PASSIVE_PURCHASE_HINT}"
+
+
+async def get_user_passive_levels(session: AsyncSession, user: User) -> Dict[str, int]:
+    """Return dictionary of passive source code to level for the user."""
+
+    rows = (
+        await session.execute(
+            select(UserPassiveSource.source_code, UserPassiveSource.level)
+            .where(UserPassiveSource.user_id == user.id)
+            .order_by(UserPassiveSource.id)
+        )
+    ).all()
+    return {code: max(1, lvl or 1) for code, lvl in rows}
+
+
+@router.message(Command("passive"))
+@safe_handler
+async def passive_overview(message: Message, state: FSMContext):
+    async with session_scope() as session:
+        user = await ensure_user_loaded(session, message)
+        if not user:
+            return
+        achievements: List[Tuple[Achievement, UserAchievement]] = []
+        idle_result = await process_offline_income(session, user, achievements)
+        await handle_idle_completion(message, session, user, state, idle_result)
+        await notify_new_achievements(message, achievements)
+        owned = await get_user_passive_levels(session, user)
+        overview = render_passive_sources(owned)
+        await message.answer(overview)
+
+
+@router.message(Command("buy_passive"))
+@safe_handler
+async def passive_buy(message: Message, state: FSMContext):
+    args = (message.text or "").split()
+    if len(args) < 2:
+        await message.answer(RU.PASSIVE_USAGE)
+        return
+    try:
+        index = int(args[1])
+    except ValueError:
+        await message.answer(RU.PASSIVE_USAGE)
+        return
+    if index < 1 or index > len(PASSIVE_SOURCES):
+        await message.answer(RU.PASSIVE_UNKNOWN)
+        return
+    source = PASSIVE_SOURCES[index - 1]
+    async with session_scope() as session:
+        user = await ensure_user_loaded(session, message)
+        if not user:
+            return
+        achievements: List[Tuple[Achievement, UserAchievement]] = []
+        idle_result = await process_offline_income(session, user, achievements)
+        await handle_idle_completion(message, session, user, state, idle_result)
+        await notify_new_achievements(message, achievements)
+        existing = await session.scalar(
+            select(UserPassiveSource)
+            .where(
+                UserPassiveSource.user_id == user.id,
+                UserPassiveSource.source_code == source["code"],
+            )
+        )
+        if existing:
+            await message.answer(RU.PASSIVE_ALREADY)
+            return
+        if user.level < source["min_level"]:
+            await message.answer(RU.PASSIVE_LOCKED.format(lvl=source["min_level"]))
+            return
+        price = int(source["price"])
+        if user.balance < price:
+            await message.answer(RU.INSUFFICIENT_FUNDS)
+            return
+        now = utcnow()
+        user.balance -= price
+        user.updated_at = now
+        entry = UserPassiveSource(
+            user_id=user.id,
+            source_code=source["code"],
+            level=1,
+            purchased_at=now,
+        )
+        session.add(entry)
+        session.add(
+            EconomyLog(
+                user_id=user.id,
+                type="passive_purchase",
+                amount=-price,
+                meta={"source": source["code"]},
+                created_at=now,
+            )
+        )
+        income_display = format_money(source["income_per_min"])
+        await message.answer(
+            RU.PASSIVE_PURCHASED.format(name=source["title"], income=income_display)
+        )
+        owned = await get_user_passive_levels(session, user)
+        await message.answer(render_passive_sources(owned))
 
 
 # --- Команда ---
