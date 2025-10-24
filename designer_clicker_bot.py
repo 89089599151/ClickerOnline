@@ -3938,6 +3938,43 @@ async def notify_new_achievements(
         ua.notified = True
 
 
+class DirectMessageAdapter:
+    """Minimal adapter to reuse message-based helpers for direct bot sends."""
+
+    def __init__(self, bot: Bot, chat_id: int):
+        self.bot = bot
+        self._chat_id = chat_id
+
+    async def answer(self, text: str, **kwargs) -> None:  # noqa: D401 - delegated call
+        await self.bot.send_message(self._chat_id, text, **kwargs)
+
+
+async def notify_new_achievements_direct(
+    bot: Bot, user: User, unlocked: List[Tuple[Achievement, UserAchievement]]
+) -> None:
+    """Send unlocked achievements directly to the user via bot messaging."""
+
+    if not unlocked:
+        return
+    if not bot:
+        return
+    lines = [
+        RU.ACHIEVEMENT_UNLOCK.format(
+            title=f"{ach.icon} {ach.name}", desc=ach.description
+        )
+        for ach, _ in unlocked
+    ]
+    try:
+        await bot.send_message(
+            user.tg_id, "\n".join(lines), reply_markup=kb_achievement_prompt()
+        )
+    except Exception:  # noqa: BLE001 - log and continue if user can't be notified
+        logger.debug("Failed to notify achievements directly", exc_info=True)
+    else:
+        for _, ua in unlocked:
+            ua.notified = True
+
+
 def _income_components() -> Tuple[Any, Any]:
     """Utility to build CASE sums for passive and active income aggregation."""
 
@@ -7679,62 +7716,166 @@ async def admin_give_shield(message: Message):
         await message.answer(f"🛡️ Страховка: теперь {entry.level} заряд(ов).")
 
 
+async def _notify_money_grant(message: Message, user: User, amount: int, comment: str) -> None:
+    if not message.bot:
+        return
+    lines = [
+        "💸 Администратор начислил вам {amount}.".format(amount=format_price(amount)),
+        "Новый баланс: {balance}.".format(balance=format_price(user.balance)),
+    ]
+    if comment:
+        lines.append(f"Комментарий: {comment}")
+    try:
+        await message.bot.send_message(user.tg_id, "\n".join(lines))
+    except Exception:  # noqa: BLE001 - уведомление не обязательно
+        logger.debug("Failed to notify user about money grant", exc_info=True)
+
+
+async def _notify_xp_grant(message: Message, user: User, amount: int) -> None:
+    if not message.bot:
+        return
+    text = (
+        "✨ Администратор начислил вам {amount} XP. Текущий уровень: {level}. "
+        "Опыт: {xp}/{need}."
+    ).format(amount=amount, level=user.level, xp=user.xp, need=xp_to_level(user.level))
+    try:
+        await message.bot.send_message(user.tg_id, text)
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed to notify user about xp grant", exc_info=True)
+
+
 @router.message(Command("give_money"))
 @safe_handler
 async def admin_give_money(message: Message):
     if not _is_base_admin(message):
         return
-    parts = (message.text or "").split(maxsplit=2)
-    if len(parts) < 2:
-        await message.answer("Использование: /give_money СУММА [комментарий]")
+    parts = (message.text or "").split(maxsplit=3)
+    if len(parts) < 3:
+        await message.answer("Использование: /give_money ID СУММА [комментарий]")
         return
     try:
-        amount = int(parts[1])
+        target_tg_id = int(parts[1])
+    except ValueError:
+        await message.answer("ID пользователя должен быть целым числом.")
+        return
+    try:
+        amount = int(parts[2])
     except ValueError:
         await message.answer("Сумма должна быть целым числом.")
         return
     if amount <= 0:
         await message.answer("Укажите сумму > 0.")
         return
-    comment = parts[2].strip() if len(parts) > 2 else ""
-    achievements: List[Tuple[Achievement, UserAchievement]] = []
+    comment = parts[3].strip() if len(parts) > 3 else ""
     async with session_scope() as session:
-        user = await ensure_user_loaded(session, message)
-        if not user:
+        target = await get_user_by_tg(session, target_tg_id)
+        if not target:
+            await message.answer(f"Пользователь с ID {target_tg_id} не найден.")
             return
+        achievements: List[Tuple[Achievement, UserAchievement]] = []
         now = utcnow()
-        user.balance += amount
-        user.updated_at = now
-        meta: Dict[str, Any] = {"source": "admin_command"}
+        target.balance += amount
+        target.updated_at = now
+        meta: Dict[str, Any] = {"source": "admin_command", "admin_tg_id": message.from_user.id}
         if comment:
             meta["comment"] = comment
         session.add(
             EconomyLog(
-                user_id=user.id,
+                user_id=target.id,
                 type="admin_grant",
                 amount=amount,
                 meta=meta,
                 created_at=now,
             )
         )
-        achievements.extend(await evaluate_achievements(session, user, {"balance"}))
+        achievements.extend(await evaluate_achievements(session, target, {"balance"}))
+        admin_reply = (
+            "💸 Начислено {amount_text} пользователю {target_id}. Новый баланс: {balance_text}"
+        ).format(
+            amount_text=format_price(amount),
+            target_id=target.tg_id,
+            balance_text=format_price(target.balance),
+        )
+        if comment:
+            admin_reply = f"{admin_reply}\nКомментарий: {comment}"
+        await message.answer(admin_reply)
+        await _notify_money_grant(message, target, amount, comment)
+        if achievements:
+            await notify_new_achievements_direct(message.bot, target, achievements)
         logger.info(
             "Admin granted money",
             extra={
-                "tg_id": user.tg_id,
-                "user_id": user.id,
+                "admin_tg_id": message.from_user.id if message.from_user else None,
+                "target_tg_id": target.tg_id,
+                "user_id": target.id,
                 "amount": amount,
                 "comment": comment or None,
             },
         )
-    await message.answer(
-        "💸 Начислено {amount_text}. Новый баланс: {balance_text}".format(
-            amount_text=format_price(amount),
-            balance_text=format_price(user.balance),
+
+
+@router.message(Command("give_xp"))
+@safe_handler
+async def admin_give_xp(message: Message):
+    if not _is_base_admin(message):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        await message.answer("Использование: /give_xp ID СУММА")
+        return
+    try:
+        target_tg_id = int(parts[1])
+    except ValueError:
+        await message.answer("ID пользователя должен быть целым числом.")
+        return
+    try:
+        amount = int(parts[2])
+    except ValueError:
+        await message.answer("Количество XP должно быть целым числом.")
+        return
+    if amount <= 0:
+        await message.answer("Укажите значение XP > 0.")
+        return
+    async with session_scope() as session:
+        target = await get_user_by_tg(session, target_tg_id)
+        if not target:
+            await message.answer(f"Пользователь с ID {target_tg_id} не найден.")
+            return
+        prev_level = target.level
+        levels_gained = await add_xp_and_levelup(target, amount)
+        target.updated_at = utcnow()
+        achievements = await evaluate_achievements(session, target, {"level"})
+        await message.answer(
+            "✨ Начислено {amount} XP пользователю {target_id}. Текущий уровень: {level}. "
+            "Опыт: {xp}/{need}.".format(
+                amount=amount,
+                target_id=target.tg_id,
+                level=target.level,
+                xp=target.xp,
+                need=xp_to_level(target.level),
+            )
         )
-    )
-    if achievements:
-        await notify_new_achievements(message, achievements)
+        await _notify_xp_grant(message, target, amount)
+        if achievements:
+            await notify_new_achievements_direct(message.bot, target, achievements)
+        if levels_gained and message.bot:
+            await notify_level_up_message(
+                DirectMessageAdapter(message.bot, target.tg_id),
+                session,
+                target,
+                prev_level,
+                levels_gained,
+            )
+        logger.info(
+            "Admin granted xp",
+            extra={
+                "admin_tg_id": message.from_user.id if message.from_user else None,
+                "target_tg_id": target.tg_id,
+                "user_id": target.id,
+                "amount": amount,
+                "levels_gained": levels_gained,
+            },
+        )
 
 
 @router.message(Command("give_xp"))
