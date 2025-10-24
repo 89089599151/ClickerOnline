@@ -130,6 +130,8 @@ BOOST_COST_GROWTH = 1.6
 BOOSTS_PER_PAGE = 5
 BOOST_SELECTION_INPUTS = {str(i) for i in range(1, 11)}
 FREE_UPGRADE_PRICE_LABEL = "0 ₽ (первый раз бесплатно)"
+TEAM_UPGRADE_GROWTH = 1.22
+TEAM_BULK_CALC_LIMIT = 1000
 
 
 def is_tutorial_active(user: Optional["User"]) -> bool:
@@ -405,6 +407,11 @@ class RU:
     BTN_EQUIP = "🧩 Экипировать"
     BTN_BUY = "💳 Купить"
     BTN_UPGRADE = "⚙️ Повысить"
+    BTN_UPGRADE_X10 = "⚙️ Повысить x10"
+    BTN_UPGRADE_X100 = "⚙️ Повысить x100"
+    BTN_UPGRADE_MAX = "⚙️ Повысить на максимум"
+    BTN_UPGRADE_BULK_TEMPLATE = "⚙️ Повысить x{count}"
+    BTN_UPGRADE_BULK_PREFIX = "⚙️ Повысить x"
     BTN_BOOSTS = "⚡ Усиления"
     BTN_EQUIPMENT = "🧰 Экипировка"
     BTN_DAILY = "🎁 Ежедневный бонус"
@@ -465,9 +472,13 @@ class RU:
     PASSIVE_USAGE = "Укажите номер источника: /buy_passive <номер>."
     PASSIVE_UNKNOWN = "Источник с таким номером не найден."
     PASSIVE_PURCHASED = "💤 Источник «{name}» теперь приносит +{income} ₽/мин."
+    PASSIVE_UPGRADED = "🔼 «{name}» усилен до уровня {level}. Доход: {income} ₽/мин."
+    PASSIVE_NOT_OWNED = "Сначала купите источник, чтобы улучшать его."
+    PASSIVE_UPGRADE_HINT = "Повторно выберите источник, чтобы улучшить его уровень."
     PROFILE_SHIELD = "🛡️ Защита: {charges}"
     TEAM_HEADER = "👥 Команда (прогресс/мин, уровень, цена повышения):"
     TEAM_LOCKED = "👥 Команда откроется со 2 уровня."
+    TEAM_UPGRADE_BULK_FAIL = "Недостаточно средств для выбранного повышения. Доступно максимум {count} уровней."
     SHOP_HEADER = "🛒 Магазин: выберите раздел для прокачки."
     WARDROBE_HEADER = "🎽 Гардероб: слоты и доступные предметы."
     ORDERS_HEADER = "📋 Доступные заказы"
@@ -628,19 +639,19 @@ DAILY_TASKS = [
         "code": "daily_clicks",
         "text": "Совершите 100 кликов",
         "goal": 100,
-        "reward": {"xp": 120},
+        "reward": {"rub": 1000, "xp": 250},
     },
     {
         "code": "daily_orders",
         "text": "Завершите 2 заказа",
         "goal": 2,
-        "reward": {"rub": 250},
+        "reward": {"rub": 1000, "xp": 250},
     },
     {
         "code": "daily_shop",
         "text": "Купите 1 улучшение",
         "goal": 1,
-        "reward": {"xp": 80, "rub": 120},
+        "reward": {"rub": 1000, "xp": 250},
     },
 ]
 
@@ -3927,6 +3938,43 @@ async def notify_new_achievements(
         ua.notified = True
 
 
+class DirectMessageAdapter:
+    """Minimal adapter to reuse message-based helpers for direct bot sends."""
+
+    def __init__(self, bot: Bot, chat_id: int):
+        self.bot = bot
+        self._chat_id = chat_id
+
+    async def answer(self, text: str, **kwargs) -> None:  # noqa: D401 - delegated call
+        await self.bot.send_message(self._chat_id, text, **kwargs)
+
+
+async def notify_new_achievements_direct(
+    bot: Bot, user: User, unlocked: List[Tuple[Achievement, UserAchievement]]
+) -> None:
+    """Send unlocked achievements directly to the user via bot messaging."""
+
+    if not unlocked:
+        return
+    if not bot:
+        return
+    lines = [
+        RU.ACHIEVEMENT_UNLOCK.format(
+            title=f"{ach.icon} {ach.name}", desc=ach.description
+        )
+        for ach, _ in unlocked
+    ]
+    try:
+        await bot.send_message(
+            user.tg_id, "\n".join(lines), reply_markup=kb_achievement_prompt()
+        )
+    except Exception:  # noqa: BLE001 - log and continue if user can't be notified
+        logger.debug("Failed to notify achievements directly", exc_info=True)
+    else:
+        for _, ua in unlocked:
+            ua.notified = True
+
+
 def _income_components() -> Tuple[Any, Any]:
     """Utility to build CASE sums for passive and active income aggregation."""
 
@@ -4207,6 +4255,7 @@ class ShopState(StatesGroup):
     boosts = State()
     equipment = State()
     confirm_boost = State()
+    confirm_passive = State()
     confirm_item = State()
 
 
@@ -4556,6 +4605,10 @@ async def handle_click(message: Message, state: FSMContext):
             session, user, achievements, message=message, state=state
         )
         await handle_idle_completion(message, session, user, state, idle_result)
+        stats = await get_user_stats(session, user)
+        cp = max(1, int(stats.get("cp", 1)))
+        # Обновлено: учитываем фактическую силу клика в задании дня даже без активного заказа.
+        await daily_task_on_event(message, session, user, "daily_clicks", amount=cp)
         active = await get_active_order(session, user)
         if not active:
             await message.answer(
@@ -4564,12 +4617,8 @@ async def handle_click(message: Message, state: FSMContext):
             )
             return
         order_completed = False
-        stats = await get_user_stats(session, user)
-        cp = max(1, int(stats.get("cp", 1)))
         user.clicks_total += cp
         achievements.extend(await evaluate_achievements(session, user, {"clicks"}))
-        # Обновлено: учитываем фактическую силу клика в задании дня.
-        await daily_task_on_event(message, session, user, "daily_clicks", amount=cp)
         if await tutorial_on_event(message, session, user, "click"):
             await state.clear()
         event_payload: Optional[Tuple[str, Optional[InlineKeyboardMarkup]]] = None
@@ -5374,8 +5423,28 @@ def fmt_passive_shop_page(
         owned_level = owned.get(source["code"])
         if owned_level:
             lines.append(f"✅ Куплено (ур. {owned_level})")
+            next_level = owned_level + 1
+            next_income = format_money(source["income_per_min"] * next_level)
+            next_price = format_price(upgrade_cost(int(source["price"]), BOOST_COST_GROWTH, next_level))
+            lines.append(
+                f"   Следующее улучшение: ур. {next_level} · доход {next_income}{RU.CURRENCY}/мин · цена {next_price}"
+            )
         entries.append("\n".join(lines))
     return "\n\n".join(entries), labels, mapping
+
+
+def format_passive_upgrade_prompt(
+    source: Dict[str, Any], current_level: int, next_level: int, cost: int
+) -> str:
+    income_now = format_money(source["income_per_min"] * current_level)
+    income_next = format_money(source["income_per_min"] * next_level)
+    lines = [
+        f"{source['title']} — улучшение",
+        f"Текущий уровень: {current_level} · доход {income_now}{RU.CURRENCY}/мин",
+        f"После улучшения: ур. {next_level} · доход {income_next}{RU.CURRENCY}/мин",
+        f"Стоимость: {format_price(cost)}",
+    ]
+    return "\n".join(lines)
 
 
 def format_boost_purchase_prompt(
@@ -5491,7 +5560,9 @@ async def _render_passive_category(
     ]
     if total_pages > 1:
         header_lines.append(f"Страница {page + 1}/{total_pages}")
-    header_lines.append("Выберите номер, чтобы купить источник пассивного дохода.")
+    header_lines.append("Выберите номер, чтобы купить или улучшить источник пассивного дохода.")
+    if any(level > 0 for level in owned.values()):
+        header_lines.append(RU.PASSIVE_UPGRADE_HINT)
     if body:
         header_lines.extend(["", body])
     keyboard = kb_boosts_controls(
@@ -5717,7 +5788,26 @@ async def _handle_passive_shop_selection(
         idle_result = await process_offline_income(session, user, achievements)
         await handle_idle_completion(message, session, user, state, idle_result)
         await notify_new_achievements(message, achievements)
+        tutorial_active = is_tutorial_active(user)
         source = PASSIVE_SOURCES[source_index]
+        existing = await session.scalar(
+            select(UserPassiveSource).where(
+                UserPassiveSource.user_id == user.id,
+                UserPassiveSource.source_code == source["code"],
+            )
+        )
+        if existing:
+            current_level = max(1, existing.level or 1)
+            next_level = current_level + 1
+            cost = upgrade_cost(int(source["price"]), BOOST_COST_GROWTH, next_level)
+            prompt = format_passive_upgrade_prompt(source, current_level, next_level, cost)
+            await message.answer(
+                prompt,
+                reply_markup=kb_confirm(RU.BTN_UPGRADE, tutorial=tutorial_active),
+            )
+            await state.set_state(ShopState.confirm_passive)
+            await state.update_data(passive_code=source["code"], passive_index=source_index)
+            return
         success = await _purchase_passive_source(session, user, source, message)
         if success:
             await daily_task_on_event(message, session, user, "daily_shop")
@@ -5893,6 +5983,97 @@ async def shop_buy_boost(message: Message, state: FSMContext):
 @router.message(ShopState.confirm_boost, F.text == RU.BTN_CANCEL)
 @safe_handler
 async def shop_cancel_boost(message: Message, state: FSMContext):
+    await state.set_state(ShopState.boosts)
+    await render_boosts(message, state)
+
+
+@router.message(ShopState.confirm_passive, F.text == RU.BTN_UPGRADE)
+@safe_handler
+async def shop_upgrade_passive(message: Message, state: FSMContext):
+    data = await state.get_data()
+    code = data.get("passive_code")
+    if not code:
+        await state.set_state(ShopState.boosts)
+        await render_boosts(message, state)
+        return
+    async with session_scope() as session:
+        user = await ensure_user_loaded(session, message)
+        if not user:
+            await state.clear()
+            return
+        achievements: List[Tuple[Achievement, UserAchievement]] = []
+        idle_result = await process_offline_income(session, user, achievements)
+        await handle_idle_completion(message, session, user, state, idle_result)
+        tutorial_active = is_tutorial_active(user)
+        source = PASSIVE_SOURCE_BY_CODE.get(code)
+        if not source:
+            await message.answer(RU.PASSIVE_UNKNOWN)
+            await state.set_state(ShopState.boosts)
+            await render_boosts(message, state)
+            return
+        entry = await session.scalar(
+            select(UserPassiveSource).where(
+                UserPassiveSource.user_id == user.id,
+                UserPassiveSource.source_code == code,
+            )
+        )
+        if not entry:
+            await message.answer(RU.PASSIVE_NOT_OWNED)
+            await state.set_state(ShopState.boosts)
+            await render_boosts(message, state)
+            return
+        current_level = max(1, entry.level or 1)
+        next_level = current_level + 1
+        cost = upgrade_cost(int(source.get("price", 0)), BOOST_COST_GROWTH, next_level)
+        if user.balance < cost:
+            await message.answer(RU.INSUFFICIENT_FUNDS)
+            prompt = format_passive_upgrade_prompt(source, current_level, next_level, cost)
+            await message.answer(
+                prompt,
+                reply_markup=kb_confirm(RU.BTN_UPGRADE, tutorial=tutorial_active),
+            )
+            await notify_new_achievements(message, achievements)
+            return
+        now = utcnow()
+        user.balance -= cost
+        user.updated_at = now
+        entry.level = next_level
+        session.add(
+            EconomyLog(
+                user_id=user.id,
+                type="passive_upgrade",
+                amount=-cost,
+                meta={"source": source["code"], "level": next_level},
+                created_at=now,
+            )
+        )
+        logger.info(
+            "Passive source upgraded",
+            extra={
+                "tg_id": user.tg_id,
+                "user_id": user.id,
+                "source": source["code"],
+                "level": next_level,
+            },
+        )
+        achievements.extend(await evaluate_achievements(session, user, {"passive_income"}))
+        await message.answer(
+            RU.PASSIVE_UPGRADED.format(
+                name=source["title"],
+                level=next_level,
+                income=format_money(source["income_per_min"] * next_level),
+            )
+        )
+        await daily_task_on_event(message, session, user, "daily_shop")
+        await tutorial_on_event(message, session, user, "upgrade_purchase")
+        await notify_new_achievements(message, achievements)
+    await state.set_state(ShopState.boosts)
+    await render_boosts(message, state)
+
+
+@router.message(ShopState.confirm_passive, F.text == RU.BTN_CANCEL)
+@safe_handler
+async def shop_cancel_passive(message: Message, state: FSMContext):
     await state.set_state(ShopState.boosts)
     await render_boosts(message, state)
 
@@ -6282,6 +6463,121 @@ def fmt_team(sub: List[TeamMember], levels: Dict[int, int], costs: Dict[int, int
     return "\n".join(lines)
 
 
+@dataclass
+class TeamUpgradeOptions:
+    next_cost: int
+    max_bulk: int
+    cost_x10: Optional[int]
+    cost_x100: Optional[int]
+    max_cost: Optional[int]
+
+    def max_label(self) -> Optional[str]:
+        if self.max_bulk > 1:
+            return RU.BTN_UPGRADE_BULK_TEMPLATE.format(count=self.max_bulk)
+        return None
+
+
+def compute_team_upgrade_options(
+    member: TeamMember,
+    current_level: int,
+    discount_pct: float,
+    balance: float,
+    *,
+    limit: int = TEAM_BULK_CALC_LIMIT,
+) -> TeamUpgradeOptions:
+    total_cost = 0
+    max_bulk = 0
+    cost_x10: Optional[int] = None
+    cost_x100: Optional[int] = None
+    max_cost: Optional[int] = None
+    next_cost: Optional[int] = None
+    raw_cost = member.base_cost * (TEAM_UPGRADE_GROWTH ** max(0, current_level))
+    for step in range(1, limit + 1):
+        step_cost = apply_percentage_discount(
+            raw_cost, discount_pct, cap=TEAM_DISCOUNT_CAP
+        )
+        if next_cost is None:
+            next_cost = step_cost
+        total_cost += step_cost
+        if total_cost > balance:
+            break
+        max_bulk = step
+        if step == 10:
+            cost_x10 = total_cost
+        if step == 100:
+            cost_x100 = total_cost
+        max_cost = total_cost
+        raw_cost *= TEAM_UPGRADE_GROWTH
+    if next_cost is None:
+        next_cost = apply_percentage_discount(
+            member.base_cost * (TEAM_UPGRADE_GROWTH ** max(0, current_level)),
+            discount_pct,
+            cap=TEAM_DISCOUNT_CAP,
+        )
+    return TeamUpgradeOptions(
+        next_cost=next_cost,
+        max_bulk=max_bulk,
+        cost_x10=cost_x10,
+        cost_x100=cost_x100,
+        max_cost=max_cost,
+    )
+
+
+def team_upgrade_total_cost(
+    member: TeamMember, current_level: int, discount_pct: float, steps: int
+) -> int:
+    if steps <= 0:
+        return 0
+    raw_cost = member.base_cost * (TEAM_UPGRADE_GROWTH ** max(0, current_level))
+    total = 0
+    for _ in range(steps):
+        step_cost = apply_percentage_discount(
+            raw_cost, discount_pct, cap=TEAM_DISCOUNT_CAP
+        )
+        total += step_cost
+        raw_cost *= TEAM_UPGRADE_GROWTH
+    return total
+
+
+def kb_team_upgrade_options(
+    options: TeamUpgradeOptions, *, tutorial: bool = False
+) -> ReplyKeyboardMarkup:
+    rows: List[List[str]] = [[RU.BTN_UPGRADE]]
+    bulk_row: List[str] = []
+    if options.cost_x10 is not None:
+        bulk_row.append(RU.BTN_UPGRADE_X10)
+    if options.max_bulk > 1:
+        bulk_row.append(RU.BTN_UPGRADE_MAX)
+    if bulk_row:
+        rows.append(bulk_row)
+    rows.append([RU.BTN_CANCEL])
+    _append_tutorial_skip(rows, tutorial)
+    return _reply_keyboard(rows)
+
+
+def format_team_upgrade_prompt(
+    member: TeamMember,
+    current_level: int,
+    balance: float,
+    options: TeamUpgradeOptions,
+) -> str:
+    lines = [f"Повысить «{member.name}»?"]
+    lines.append(f"Текущий уровень: {current_level}")
+    lines.append(f"Баланс: {format_price(balance)}")
+    lines.append(f"Следующее повышение: {format_price(options.next_cost)}")
+    if options.cost_x10 is not None:
+        lines.append(f"+10 уровней: {format_price(options.cost_x10)}")
+    if options.cost_x100 is not None:
+        lines.append(f"+100 уровней: {format_price(options.cost_x100)}")
+    if options.max_bulk > 1 and options.max_cost is not None:
+        target = current_level + options.max_bulk
+        lines.append(
+            f"Максимум: +{options.max_bulk} уровней (до {target}) за {format_price(options.max_cost)}"
+        )
+    lines.append("Выберите вариант повышения или отмените.")
+    return "\n".join(lines)
+
+
 async def render_team(message: Message, state: FSMContext):
     async with session_scope() as session:
         user = await ensure_user_loaded(session, message)
@@ -6318,7 +6614,7 @@ async def render_team(message: Message, state: FSMContext):
         costs = {}
         for m in members:
             lvl = max(0, levels.get(m.id, 0))
-            base_cost = m.base_cost * (1.22 ** lvl)
+            base_cost = m.base_cost * (TEAM_UPGRADE_GROWTH ** lvl)
             costs[m.id] = apply_percentage_discount(base_cost, discount_pct, cap=TEAM_DISCOUNT_CAP)
         page = int((await state.get_data()).get("page", 0))
         sub, has_prev, has_next = slice_page(members, page, 5)
@@ -6371,7 +6667,20 @@ async def team_choose(message: Message, state: FSMContext):
             await message.answer("Сотрудник ещё не готов присоединиться — прокачайте уровень.")
             await render_team(message, state)
             return
-        await message.answer(f"Повысить «{member.name}»?", reply_markup=kb_confirm(RU.BTN_UPGRADE))
+        stats = await get_user_stats(session, user)
+        team_entry = await session.scalar(
+            select(UserTeam).where(UserTeam.user_id == user.id, UserTeam.member_id == mid)
+        )
+        current_level = team_entry.level if team_entry else 0
+        options = compute_team_upgrade_options(
+            member,
+            current_level,
+            stats.get("team_upgrade_discount_pct", 0.0),
+            user.balance,
+        )
+        prompt = format_team_upgrade_prompt(member, current_level, user.balance, options)
+        keyboard = kb_team_upgrade_options(options, tutorial=is_tutorial_active(user))
+        await message.answer(prompt, reply_markup=keyboard)
     await state.set_state(TeamState.confirm)
     await state.update_data(member_id=mid)
 
@@ -6392,19 +6701,22 @@ async def team_next(message: Message, state: FSMContext):
     await render_team(message, state)
 
 
-@router.message(TeamState.confirm, F.text == RU.BTN_UPGRADE)
+@router.message(TeamState.confirm, F.text.startswith("⚙️ Повысить"))
 @safe_handler
 async def team_upgrade(message: Message, state: FSMContext):
     mid = int((await state.get_data())["member_id"])
-    response_lines: List[str] = []
-    next_cost_preview: Optional[int] = None
-    member_name: Optional[str] = None
-    current_level: Optional[int] = None
+    text = (message.text or "").strip()
+    summary_options: Optional[TeamUpgradeOptions] = None
+    final_level: Optional[int] = None
+    member_obj: Optional[TeamMember] = None
+    final_balance: Optional[float] = None
+    tutorial_active = False
     async with session_scope() as session:
         user = await ensure_user_loaded(session, message)
         if not user:
             await state.clear()
             return
+        tutorial_active = is_tutorial_active(user)
         achievements: List[Tuple[Achievement, UserAchievement]] = []
         idle_result = await process_offline_income(session, user, achievements)
         await handle_idle_completion(message, session, user, state, idle_result)
@@ -6414,7 +6726,7 @@ async def team_upgrade(message: Message, state: FSMContext):
             await state.set_state(TeamState.browsing)
             await render_team(message, state)
             return
-        member_name = member.name
+        member_obj = member
         if user.level < member.min_level:
             await message.answer("Сначала достигните нужного уровня, чтобы работать с этим специалистом.")
             await state.set_state(TeamState.browsing)
@@ -6426,29 +6738,65 @@ async def team_upgrade(message: Message, state: FSMContext):
         )
         lvl = team_entry.level if team_entry else 0
         discount_pct = stats.get("team_upgrade_discount_pct", 0.0)
-        cost = apply_percentage_discount(
-            member.base_cost * (1.22 ** lvl), discount_pct, cap=TEAM_DISCOUNT_CAP
+        options_before = compute_team_upgrade_options(
+            member, lvl, discount_pct, user.balance
         )
-        if user.balance < cost:
+        summary_options = options_before
+        if text == RU.BTN_UPGRADE:
+            steps = 1
+        elif text == RU.BTN_UPGRADE_X10:
+            steps = 10
+        elif text == RU.BTN_UPGRADE_X100:
+            steps = 100
+        elif text == RU.BTN_UPGRADE_MAX:
+            steps = max(1, options_before.max_bulk)
+        elif text.startswith(RU.BTN_UPGRADE_BULK_PREFIX):
+            try:
+                steps = max(1, int(text[len(RU.BTN_UPGRADE_BULK_PREFIX) :].strip()))
+            except ValueError:
+                steps = 1
+        else:
+            steps = 1
+        total_cost = team_upgrade_total_cost(member, lvl, discount_pct, steps)
+        if user.balance < total_cost or total_cost <= 0:
             await message.answer(RU.INSUFFICIENT_FUNDS)
-            current_level = lvl
-            next_cost_preview = cost
+            if options_before.max_bulk and options_before.max_bulk < steps:
+                await message.answer(
+                    RU.TEAM_UPGRADE_BULK_FAIL.format(count=options_before.max_bulk)
+                )
+            elif options_before.max_bulk == 0:
+                await message.answer(RU.TEAM_UPGRADE_BULK_FAIL.format(count=0))
+            if options_before.max_bulk > 0 and options_before.max_cost is not None:
+                await message.answer(
+                    f"Доступный пакет: +{options_before.max_bulk} уровней за {format_price(options_before.max_cost)}."
+                )
+            elif options_before.max_bulk == 0:
+                await message.answer(
+                    f"Следующее повышение стоит {format_price(options_before.next_cost)}."
+                )
+            final_level = lvl
         else:
             now = utcnow()
-            user.balance -= cost
-            user.updated_at = now
             if not team_entry:
-                session.add(UserTeam(user_id=user.id, member_id=mid, level=1))
-                current_level = 1
-            else:
-                team_entry.level += 1
-                current_level = team_entry.level
+                team_entry = UserTeam(user_id=user.id, member_id=mid, level=lvl)
+                session.add(team_entry)
+            team_entry.level = (team_entry.level or 0) + steps
+            user.balance -= total_cost
+            user.updated_at = now
+            new_level = team_entry.level
+            final_level = new_level
             session.add(
                 EconomyLog(
                     user_id=user.id,
                     type="team_upgrade",
-                    amount=-cost,
-                    meta={"member": member.code, "lvl": lvl + 1},
+                    amount=-total_cost,
+                    meta={
+                        "member": member.code,
+                        "lvl": new_level,
+                        "from_level": lvl,
+                        "to_level": new_level,
+                        "count": steps,
+                    },
                     created_at=now,
                 )
             )
@@ -6458,27 +6806,28 @@ async def team_upgrade(message: Message, state: FSMContext):
                     "tg_id": user.tg_id,
                     "user_id": user.id,
                     "member": member.code,
-                    "level": current_level,
+                    "level": new_level,
+                    "count": steps,
                 },
             )
             await update_campaign_progress(session, user, "team_upgrade", {})
-            await message.answer(RU.UPGRADE_OK)
             achievements.extend(await evaluate_achievements(session, user, {"team"}))
-            next_cost_preview = apply_percentage_discount(
-                member.base_cost * (1.22 ** current_level), discount_pct, cap=TEAM_DISCOUNT_CAP
+            await message.answer(
+                f"{RU.UPGRADE_OK}\nПолучено уровней: +{steps} (до {new_level})."
+            )
+            summary_options = compute_team_upgrade_options(
+                member, new_level, discount_pct, user.balance
             )
         await notify_new_achievements(message, achievements)
+        final_balance = user.balance
     await state.set_state(TeamState.confirm)
     await state.update_data(member_id=mid)
-    if member_name is not None and current_level is not None:
-        level_line = f"«{member_name}» — текущий уровень {current_level}."
-        response_lines.append(level_line)
-    if next_cost_preview:
-        response_lines.append(f"Следующее повышение обойдётся в {format_money(next_cost_preview)} ₽.")
-    if response_lines:
-        # Обновлено: оставляем игрока на карточке сотрудника для повторной прокачки.
-        response_lines.append("Нажмите «⚙️ Повысить» для продолжения или «Отмена» для выхода.")
-        await message.answer("\n".join(response_lines), reply_markup=kb_confirm(RU.BTN_UPGRADE))
+    if member_obj and summary_options and final_level is not None and final_balance is not None:
+        prompt = format_team_upgrade_prompt(
+            member_obj, final_level, final_balance, summary_options
+        )
+        keyboard = kb_team_upgrade_options(summary_options, tutorial=tutorial_active)
+        await message.answer(prompt, reply_markup=keyboard)
 
 
 @router.message(TeamState.confirm, F.text == RU.BTN_CANCEL)
@@ -7367,62 +7716,166 @@ async def admin_give_shield(message: Message):
         await message.answer(f"🛡️ Страховка: теперь {entry.level} заряд(ов).")
 
 
+async def _notify_money_grant(message: Message, user: User, amount: int, comment: str) -> None:
+    if not message.bot:
+        return
+    lines = [
+        "💸 Администратор начислил вам {amount}.".format(amount=format_price(amount)),
+        "Новый баланс: {balance}.".format(balance=format_price(user.balance)),
+    ]
+    if comment:
+        lines.append(f"Комментарий: {comment}")
+    try:
+        await message.bot.send_message(user.tg_id, "\n".join(lines))
+    except Exception:  # noqa: BLE001 - уведомление не обязательно
+        logger.debug("Failed to notify user about money grant", exc_info=True)
+
+
+async def _notify_xp_grant(message: Message, user: User, amount: int) -> None:
+    if not message.bot:
+        return
+    text = (
+        "✨ Администратор начислил вам {amount} XP. Текущий уровень: {level}. "
+        "Опыт: {xp}/{need}."
+    ).format(amount=amount, level=user.level, xp=user.xp, need=xp_to_level(user.level))
+    try:
+        await message.bot.send_message(user.tg_id, text)
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed to notify user about xp grant", exc_info=True)
+
+
 @router.message(Command("give_money"))
 @safe_handler
 async def admin_give_money(message: Message):
     if not _is_base_admin(message):
         return
-    parts = (message.text or "").split(maxsplit=2)
-    if len(parts) < 2:
-        await message.answer("Использование: /give_money СУММА [комментарий]")
+    parts = (message.text or "").split(maxsplit=3)
+    if len(parts) < 3:
+        await message.answer("Использование: /give_money ID СУММА [комментарий]")
         return
     try:
-        amount = int(parts[1])
+        target_tg_id = int(parts[1])
+    except ValueError:
+        await message.answer("ID пользователя должен быть целым числом.")
+        return
+    try:
+        amount = int(parts[2])
     except ValueError:
         await message.answer("Сумма должна быть целым числом.")
         return
     if amount <= 0:
         await message.answer("Укажите сумму > 0.")
         return
-    comment = parts[2].strip() if len(parts) > 2 else ""
-    achievements: List[Tuple[Achievement, UserAchievement]] = []
+    comment = parts[3].strip() if len(parts) > 3 else ""
     async with session_scope() as session:
-        user = await ensure_user_loaded(session, message)
-        if not user:
+        target = await get_user_by_tg(session, target_tg_id)
+        if not target:
+            await message.answer(f"Пользователь с ID {target_tg_id} не найден.")
             return
+        achievements: List[Tuple[Achievement, UserAchievement]] = []
         now = utcnow()
-        user.balance += amount
-        user.updated_at = now
-        meta: Dict[str, Any] = {"source": "admin_command"}
+        target.balance += amount
+        target.updated_at = now
+        meta: Dict[str, Any] = {"source": "admin_command", "admin_tg_id": message.from_user.id}
         if comment:
             meta["comment"] = comment
         session.add(
             EconomyLog(
-                user_id=user.id,
+                user_id=target.id,
                 type="admin_grant",
                 amount=amount,
                 meta=meta,
                 created_at=now,
             )
         )
-        achievements.extend(await evaluate_achievements(session, user, {"balance"}))
+        achievements.extend(await evaluate_achievements(session, target, {"balance"}))
+        admin_reply = (
+            "💸 Начислено {amount_text} пользователю {target_id}. Новый баланс: {balance_text}"
+        ).format(
+            amount_text=format_price(amount),
+            target_id=target.tg_id,
+            balance_text=format_price(target.balance),
+        )
+        if comment:
+            admin_reply = f"{admin_reply}\nКомментарий: {comment}"
+        await message.answer(admin_reply)
+        await _notify_money_grant(message, target, amount, comment)
+        if achievements:
+            await notify_new_achievements_direct(message.bot, target, achievements)
         logger.info(
             "Admin granted money",
             extra={
-                "tg_id": user.tg_id,
-                "user_id": user.id,
+                "admin_tg_id": message.from_user.id if message.from_user else None,
+                "target_tg_id": target.tg_id,
+                "user_id": target.id,
                 "amount": amount,
                 "comment": comment or None,
             },
         )
-    await message.answer(
-        "💸 Начислено {amount_text}. Новый баланс: {balance_text}".format(
-            amount_text=format_price(amount),
-            balance_text=format_price(user.balance),
+
+
+@router.message(Command("give_xp"))
+@safe_handler
+async def admin_give_xp(message: Message):
+    if not _is_base_admin(message):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        await message.answer("Использование: /give_xp ID СУММА")
+        return
+    try:
+        target_tg_id = int(parts[1])
+    except ValueError:
+        await message.answer("ID пользователя должен быть целым числом.")
+        return
+    try:
+        amount = int(parts[2])
+    except ValueError:
+        await message.answer("Количество XP должно быть целым числом.")
+        return
+    if amount <= 0:
+        await message.answer("Укажите значение XP > 0.")
+        return
+    async with session_scope() as session:
+        target = await get_user_by_tg(session, target_tg_id)
+        if not target:
+            await message.answer(f"Пользователь с ID {target_tg_id} не найден.")
+            return
+        prev_level = target.level
+        levels_gained = await add_xp_and_levelup(target, amount)
+        target.updated_at = utcnow()
+        achievements = await evaluate_achievements(session, target, {"level"})
+        await message.answer(
+            "✨ Начислено {amount} XP пользователю {target_id}. Текущий уровень: {level}. "
+            "Опыт: {xp}/{need}.".format(
+                amount=amount,
+                target_id=target.tg_id,
+                level=target.level,
+                xp=target.xp,
+                need=xp_to_level(target.level),
+            )
         )
-    )
-    if achievements:
-        await notify_new_achievements(message, achievements)
+        await _notify_xp_grant(message, target, amount)
+        if achievements:
+            await notify_new_achievements_direct(message.bot, target, achievements)
+        if levels_gained and message.bot:
+            await notify_level_up_message(
+                DirectMessageAdapter(message.bot, target.tg_id),
+                session,
+                target,
+                prev_level,
+                levels_gained,
+            )
+        logger.info(
+            "Admin granted xp",
+            extra={
+                "admin_tg_id": message.from_user.id if message.from_user else None,
+                "target_tg_id": target.tg_id,
+                "user_id": target.id,
+                "amount": amount,
+                "levels_gained": levels_gained,
+            },
+        )
 
 
 @router.message(Command("test_event_choice"))
