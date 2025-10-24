@@ -125,7 +125,7 @@ TREND_REWARD_MUL = 2.0  # Баланс: снизьте, если доходы р
 PRESTIGE_GAIN_DIVISOR = 1_000  # Коэффициент K для формулы репутации; подберите под экономику поздней игры.
 BOOST_COST_GROWTH = 1.6
 BOOSTS_PER_PAGE = 5
-BOOST_SELECTION_INPUTS = {str(i) for i in range(1, BOOSTS_PER_PAGE + 1)}
+BOOST_SELECTION_INPUTS = {str(i) for i in range(1, 11)}
 FREE_UPGRADE_PRICE_LABEL = "0 ₽ (первый раз бесплатно)"
 
 
@@ -193,6 +193,8 @@ ORDER_DESCRIPTIONS: Dict[str, str] = {
 
 
 # Источники пассивного дохода: значения собраны в одном месте для быстрой балансировки.
+PASSIVE_CATEGORY_KEY = "passive_income"
+
 PASSIVE_SOURCES: List[Dict[str, Any]] = [
     {
         "code": "bank_deposit",
@@ -737,10 +739,17 @@ def kb_boost_categories(*, tutorial: bool = False) -> ReplyKeyboardMarkup:
 
 
 def kb_boosts_controls(
-    has_prev: bool, has_next: bool, count: int, *, tutorial: bool = False
+    has_prev: bool,
+    has_next: bool,
+    count: int,
+    *,
+    tutorial: bool = False,
+    labels: Optional[List[str]] = None,
 ) -> ReplyKeyboardMarkup:
     rows: List[List[str]] = []
-    if count > 0:
+    if labels:
+        rows.append(labels)
+    elif count > 0:
         rows.append([str(i) for i in range(1, count + 1)])
     nav_row: List[str] = []
     if has_prev:
@@ -5038,10 +5047,12 @@ BOOST_TYPE_META: Dict[str, Tuple[str, str, str]] = {
 BOOST_CATEGORY_DEFS: List[Tuple[str, Dict[str, str]]] = [
     ("economy", {"icon": "💰", "label": "Экономика"}),
     ("xp", {"icon": "🧠", "label": "Опыт"}),
+    (PASSIVE_CATEGORY_KEY, {"icon": "💤", "label": "Пассивный доход"}),
 ]
 BOOST_CATEGORY_DESCRIPTIONS: Dict[str, str] = {
     "economy": "улучшает заработок и снижает расходы.",
     "xp": "ускоряет рост уровня и навыков.",
+    PASSIVE_CATEGORY_KEY: "добавляет стабильный доход без лишних кликов.",
 }
 BOOST_CATEGORY_META: Dict[str, Dict[str, str]] = {
     key: meta for key, meta in BOOST_CATEGORY_DEFS
@@ -5329,6 +5340,41 @@ def fmt_boosts(
     return "\n".join(lines), selectable
 
 
+def fmt_passive_shop_page(
+    sources: List[Dict[str, Any]],
+    *,
+    page: int,
+    owned: Dict[str, int],
+) -> Tuple[str, List[str], Dict[str, int]]:
+    """Format passive income sources for the shop view."""
+
+    start_index = page * BOOSTS_PER_PAGE
+    sub = sources[start_index : start_index + BOOSTS_PER_PAGE]
+    if not sub:
+        return "Пока нет источников пассивного дохода.", [], {}
+
+    entries: List[str] = []
+    labels: List[str] = []
+    mapping: Dict[str, int] = {}
+    for offset, source in enumerate(sub):
+        global_index = start_index + offset + 1
+        label = str(global_index)
+        labels.append(label)
+        mapping[label] = start_index + offset
+        income = f"{format_money(source['income_per_min'])}{RU.CURRENCY}/мин"
+        price = f"{format_money(source['price'])}{RU.CURRENCY}"
+        lines = [
+            f"{label}. {source['title']}",
+            f"📈 Мин. уровень: {source['min_level']} 💰 Доход: {income} 💵 Цена: {price}",
+            source['description'],
+        ]
+        owned_level = owned.get(source["code"])
+        if owned_level:
+            lines.append(f"✅ Куплено (ур. {owned_level})")
+        entries.append("\n".join(lines))
+    return "\n\n".join(entries), labels, mapping
+
+
 def format_boost_purchase_prompt(
     boost: Boost,
     current_level: int,
@@ -5412,6 +5458,55 @@ def _boost_category(boost: Boost) -> str:
     return BOOST_CATEGORY_BY_TYPE.get(boost.type, BOOST_CATEGORY_DEFAULT)
 
 
+async def _render_passive_category(
+    message: Message,
+    state: FSMContext,
+    *,
+    session: AsyncSession,
+    user: User,
+    data: Dict[str, Any],
+    tutorial_active: bool,
+) -> None:
+    """Render passive income sources inside the shop view."""
+
+    total = len(PASSIVE_SOURCES)
+    total_pages = max(1, (total + BOOSTS_PER_PAGE - 1) // BOOSTS_PER_PAGE)
+    page = int(data.get("page", 0))
+    if page >= total_pages:
+        page = max(0, total_pages - 1)
+    owned = await get_user_passive_levels(session, user)
+    body, labels, mapping = fmt_passive_shop_page(
+        PASSIVE_SOURCES, page=page, owned=owned
+    )
+    meta = BOOST_CATEGORY_META.get(
+        PASSIVE_CATEGORY_KEY,
+        {"icon": "💤", "label": "Пассивный доход"},
+    )
+    header_lines = [
+        f"{meta['icon']} Категория «{meta['label']}» — {total} усилений",
+        f"💰 Баланс: {format_price(user.balance)}",
+    ]
+    if total_pages > 1:
+        header_lines.append(f"Страница {page + 1}/{total_pages}")
+    header_lines.append("Выберите номер, чтобы купить источник пассивного дохода.")
+    if body:
+        header_lines.extend(["", body])
+    keyboard = kb_boosts_controls(
+        page > 0,
+        page + 1 < total_pages,
+        len(labels),
+        tutorial=tutorial_active,
+        labels=[*labels],
+    )
+    await message.answer("\n".join(header_lines), reply_markup=keyboard)
+    await state.update_data(
+        boost_category=PASSIVE_CATEGORY_KEY,
+        page=page,
+        boost_ids=[],
+        passive_options=mapping,
+    )
+
+
 async def render_boosts(
     message: Message,
     state: FSMContext,
@@ -5454,6 +5549,7 @@ async def render_boosts(
                 counts: Dict[str, int] = defaultdict(int)
                 for boost in boosts:
                     counts[_boost_category(boost)] += 1
+                counts[PASSIVE_CATEGORY_KEY] = len(PASSIVE_SOURCES)
                 lines = [
                     "🛍️ Магазин усилений — выбери направление",
                     f"💰 Баланс: {format_price(user.balance)}",
@@ -5471,12 +5567,27 @@ async def render_boosts(
                 await message.answer(
                     "\n".join(lines), reply_markup=kb_boost_categories(tutorial=tutorial_active)
                 )
-                await state.update_data(page=0, boost_category=None, boost_ids=[])
+                await state.update_data(
+                    page=0, boost_category=None, boost_ids=[], passive_options={}
+                )
                 await notify_new_achievements(message, achievements)
                 return
+        if category == PASSIVE_CATEGORY_KEY:
+            await _render_passive_category(
+                message,
+                state,
+                session=session,
+                user=user,
+                data=data,
+                tutorial_active=tutorial_active,
+            )
+            await notify_new_achievements(message, achievements)
+            return
         category_boosts = [b for b in boosts if _boost_category(b) == category]
         if not category_boosts:
-            await state.update_data(boost_category=None, page=0, boost_ids=[])
+            await state.update_data(
+                boost_category=None, page=0, boost_ids=[], passive_options={}
+            )
             await message.answer(
                 "В этой категории пока нет улучшений.",
                 reply_markup=kb_boost_categories(tutorial=tutorial_active),
@@ -5517,13 +5628,17 @@ async def render_boosts(
         await message.answer(
             "\n".join(header_lines),
             reply_markup=kb_boosts_controls(
-                has_prev, has_next, len(sub), tutorial=tutorial_active
+                has_prev,
+                has_next,
+                len(sub),
+                tutorial=tutorial_active,
             ),
         )
         await state.update_data(
             boost_ids=selectable,
             page=page,
             boost_category=category,
+            passive_options={},
         )
         await notify_new_achievements(message, achievements)
 
@@ -5582,6 +5697,31 @@ async def _handle_boost_selection(
         await state.update_data(boost_id=boost_id)
 
 
+async def _handle_passive_shop_selection(
+    message: Message, state: FSMContext, source_index: int
+) -> None:
+    """Process purchasing passive income sources from the shop menu."""
+
+    async with session_scope() as session:
+        user = await ensure_user_loaded(session, message)
+        if not user:
+            await state.clear()
+            return
+        if source_index < 0 or source_index >= len(PASSIVE_SOURCES):
+            await message.answer(RU.PASSIVE_UNKNOWN)
+            return
+        achievements: List[Tuple[Achievement, UserAchievement]] = []
+        idle_result = await process_offline_income(session, user, achievements)
+        await handle_idle_completion(message, session, user, state, idle_result)
+        await notify_new_achievements(message, achievements)
+        source = PASSIVE_SOURCES[source_index]
+        success = await _purchase_passive_source(session, user, source, message)
+        if success:
+            await daily_task_on_event(message, session, user, "daily_shop")
+            await tutorial_on_event(message, session, user, "upgrade_purchase")
+    await render_boosts(message, state)
+
+
 @router.message(ShopState.root, F.text == RU.BTN_BOOSTS)
 @safe_handler
 async def shop_boosts(message: Message, state: FSMContext):
@@ -5589,6 +5729,7 @@ async def shop_boosts(message: Message, state: FSMContext):
     await state.update_data(
         page=0,
         boost_category=None,
+        passive_options={},
     )
     await render_boosts(message, state)
 
@@ -5596,8 +5737,20 @@ async def shop_boosts(message: Message, state: FSMContext):
 @router.message(ShopState.boosts, F.text.in_(BOOST_SELECTION_INPUTS))
 @safe_handler
 async def shop_choose_boost(message: Message, state: FSMContext):
-    ids = (await state.get_data()).get("boost_ids", [])
-    idx = int(message.text) - 1
+    data = await state.get_data()
+    category = data.get("boost_category")
+    if category == PASSIVE_CATEGORY_KEY:
+        mapping: Dict[str, int] = data.get("passive_options", {}) or {}
+        choice = mapping.get((message.text or "").strip())
+        if choice is None:
+            return
+        await _handle_passive_shop_selection(message, state, choice)
+        return
+    ids = data.get("boost_ids", [])
+    try:
+        idx = int(message.text) - 1
+    except (TypeError, ValueError):
+        return
     if idx < 0 or idx >= len(ids):
         return
     bid = ids[idx]
@@ -5613,7 +5766,7 @@ async def shop_boosts_select_category(message: Message, state: FSMContext):
     data = await state.get_data()
     if data.get("boost_category") == category:
         return
-    await state.update_data(boost_category=category, page=0)
+    await state.update_data(boost_category=category, page=0, passive_options={})
     await render_boosts(message, state)
 
 
@@ -5622,7 +5775,9 @@ async def shop_boosts_select_category(message: Message, state: FSMContext):
 async def shop_boosts_back(message: Message, state: FSMContext):
     data = await state.get_data()
     if data.get("boost_category"):
-        await state.update_data(boost_category=None, page=0, boost_ids=[])
+        await state.update_data(
+            boost_category=None, page=0, boost_ids=[], passive_options={}
+        )
         await render_boosts(message, state)
         return
     await state.set_state(ShopState.root)
@@ -6001,6 +6156,56 @@ def render_passive_sources(owned: Dict[str, int]) -> str:
     return f"{RU.PASSIVE_HEADER}\n\n{body}\n\n{RU.PASSIVE_PURCHASE_HINT}"
 
 
+async def _purchase_passive_source(
+    session: AsyncSession, user: User, source: Dict[str, Any], message: Message
+) -> bool:
+    """Try to buy a passive income source and report the result to the user."""
+
+    existing = await session.scalar(
+        select(UserPassiveSource)
+        .where(
+            UserPassiveSource.user_id == user.id,
+            UserPassiveSource.source_code == source["code"],
+        )
+        .limit(1)
+    )
+    if existing:
+        await message.answer(RU.PASSIVE_ALREADY)
+        return False
+    if user.level < source["min_level"]:
+        await message.answer(RU.PASSIVE_LOCKED.format(lvl=source["min_level"]))
+        return False
+    price = int(source["price"])
+    if user.balance < price:
+        await message.answer(RU.INSUFFICIENT_FUNDS)
+        return False
+    now = utcnow()
+    user.balance -= price
+    user.updated_at = now
+    session.add(
+        UserPassiveSource(
+            user_id=user.id,
+            source_code=source["code"],
+            level=1,
+            purchased_at=now,
+        )
+    )
+    session.add(
+        EconomyLog(
+            user_id=user.id,
+            type="passive_purchase",
+            amount=-price,
+            meta={"source": source["code"]},
+            created_at=now,
+        )
+    )
+    income_display = format_money(source["income_per_min"])
+    await message.answer(
+        RU.PASSIVE_PURCHASED.format(name=source["title"], income=income_display)
+    )
+    return True
+
+
 async def get_user_passive_levels(session: AsyncSession, user: User) -> Dict[str, int]:
     """Return dictionary of passive source code to level for the user."""
 
@@ -6054,46 +6259,11 @@ async def passive_buy(message: Message, state: FSMContext):
         idle_result = await process_offline_income(session, user, achievements)
         await handle_idle_completion(message, session, user, state, idle_result)
         await notify_new_achievements(message, achievements)
-        existing = await session.scalar(
-            select(UserPassiveSource)
-            .where(
-                UserPassiveSource.user_id == user.id,
-                UserPassiveSource.source_code == source["code"],
-            )
-        )
-        if existing:
-            await message.answer(RU.PASSIVE_ALREADY)
+        success = await _purchase_passive_source(session, user, source, message)
+        if not success:
             return
-        if user.level < source["min_level"]:
-            await message.answer(RU.PASSIVE_LOCKED.format(lvl=source["min_level"]))
-            return
-        price = int(source["price"])
-        if user.balance < price:
-            await message.answer(RU.INSUFFICIENT_FUNDS)
-            return
-        now = utcnow()
-        user.balance -= price
-        user.updated_at = now
-        entry = UserPassiveSource(
-            user_id=user.id,
-            source_code=source["code"],
-            level=1,
-            purchased_at=now,
-        )
-        session.add(entry)
-        session.add(
-            EconomyLog(
-                user_id=user.id,
-                type="passive_purchase",
-                amount=-price,
-                meta={"source": source["code"]},
-                created_at=now,
-            )
-        )
-        income_display = format_money(source["income_per_min"])
-        await message.answer(
-            RU.PASSIVE_PURCHASED.format(name=source["title"], income=income_display)
-        )
+        await daily_task_on_event(message, session, user, "daily_shop")
+        await tutorial_on_event(message, session, user, "upgrade_purchase")
         owned = await get_user_passive_levels(session, user)
         await message.answer(render_passive_sources(owned))
 
