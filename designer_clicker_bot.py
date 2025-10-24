@@ -409,6 +409,7 @@ class RU:
     BTN_UPGRADE = "⚙️ Повысить"
     BTN_UPGRADE_X10 = "⚙️ Повысить x10"
     BTN_UPGRADE_X100 = "⚙️ Повысить x100"
+    BTN_UPGRADE_MAX = "⚙️ Повысить на максимум"
     BTN_UPGRADE_BULK_TEMPLATE = "⚙️ Повысить x{count}"
     BTN_UPGRADE_BULK_PREFIX = "⚙️ Повысить x"
     BTN_BOOSTS = "⚡ Усиления"
@@ -638,19 +639,19 @@ DAILY_TASKS = [
         "code": "daily_clicks",
         "text": "Совершите 100 кликов",
         "goal": 100,
-        "reward": {"xp": 120},
+        "reward": {"rub": 1000, "xp": 250},
     },
     {
         "code": "daily_orders",
         "text": "Завершите 2 заказа",
         "goal": 2,
-        "reward": {"rub": 250},
+        "reward": {"rub": 1000, "xp": 250},
     },
     {
         "code": "daily_shop",
         "text": "Купите 1 улучшение",
         "goal": 1,
-        "reward": {"xp": 80, "rub": 120},
+        "reward": {"rub": 1000, "xp": 250},
     },
 ]
 
@@ -6504,17 +6505,15 @@ def team_upgrade_total_cost(
 def kb_team_upgrade_options(
     options: TeamUpgradeOptions, *, tutorial: bool = False
 ) -> ReplyKeyboardMarkup:
-    rows: List[List[str]] = [[RU.BTN_UPGRADE, RU.BTN_CANCEL]]
+    rows: List[List[str]] = [[RU.BTN_UPGRADE]]
     bulk_row: List[str] = []
     if options.cost_x10 is not None:
         bulk_row.append(RU.BTN_UPGRADE_X10)
-    if options.cost_x100 is not None:
-        bulk_row.append(RU.BTN_UPGRADE_X100)
+    if options.max_bulk > 1:
+        bulk_row.append(RU.BTN_UPGRADE_MAX)
     if bulk_row:
         rows.append(bulk_row)
-    max_label = options.max_label()
-    if max_label and max_label not in bulk_row:
-        rows.append([max_label])
+    rows.append([RU.BTN_CANCEL])
     _append_tutorial_skip(rows, tutorial)
     return _reply_keyboard(rows)
 
@@ -6670,19 +6669,6 @@ async def team_next(message: Message, state: FSMContext):
 async def team_upgrade(message: Message, state: FSMContext):
     mid = int((await state.get_data())["member_id"])
     text = (message.text or "").strip()
-    if text == RU.BTN_UPGRADE:
-        steps = 1
-    elif text == RU.BTN_UPGRADE_X10:
-        steps = 10
-    elif text == RU.BTN_UPGRADE_X100:
-        steps = 100
-    elif text.startswith(RU.BTN_UPGRADE_BULK_PREFIX):
-        try:
-            steps = max(1, int(text[len(RU.BTN_UPGRADE_BULK_PREFIX) :].strip()))
-        except ValueError:
-            steps = 1
-    else:
-        steps = 1
     summary_options: Optional[TeamUpgradeOptions] = None
     final_level: Optional[int] = None
     member_obj: Optional[TeamMember] = None
@@ -6719,6 +6705,21 @@ async def team_upgrade(message: Message, state: FSMContext):
             member, lvl, discount_pct, user.balance
         )
         summary_options = options_before
+        if text == RU.BTN_UPGRADE:
+            steps = 1
+        elif text == RU.BTN_UPGRADE_X10:
+            steps = 10
+        elif text == RU.BTN_UPGRADE_X100:
+            steps = 100
+        elif text == RU.BTN_UPGRADE_MAX:
+            steps = max(1, options_before.max_bulk)
+        elif text.startswith(RU.BTN_UPGRADE_BULK_PREFIX):
+            try:
+                steps = max(1, int(text[len(RU.BTN_UPGRADE_BULK_PREFIX) :].strip()))
+            except ValueError:
+                steps = 1
+        else:
+            steps = 1
         total_cost = team_upgrade_total_cost(member, lvl, discount_pct, steps)
         if user.balance < total_cost or total_cost <= 0:
             await message.answer(RU.INSUFFICIENT_FUNDS)
@@ -7734,6 +7735,54 @@ async def admin_give_money(message: Message):
     )
     if achievements:
         await notify_new_achievements(message, achievements)
+
+
+@router.message(Command("give_xp"))
+@safe_handler
+async def admin_give_xp(message: Message):
+    if not _is_base_admin(message):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Использование: /give_xp СУММА")
+        return
+    try:
+        amount = int(parts[1])
+    except ValueError:
+        await message.answer("Количество XP должно быть целым числом.")
+        return
+    if amount <= 0:
+        await message.answer("Укажите значение XP > 0.")
+        return
+    async with session_scope() as session:
+        user = await ensure_user_loaded(session, message)
+        if not user:
+            return
+        prev_level = user.level
+        levels_gained = await add_xp_and_levelup(user, amount)
+        user.updated_at = utcnow()
+        achievements = await evaluate_achievements(session, user, {"level"})
+        await message.answer(
+            "✨ Начислено {amount} XP. Текущий уровень: {level}. Опыт: {xp}/{need}.".format(
+                amount=amount,
+                level=user.level,
+                xp=user.xp,
+                need=xp_to_level(user.level),
+            )
+        )
+        if achievements:
+            await notify_new_achievements(message, achievements)
+        if levels_gained:
+            await notify_level_up_message(message, session, user, prev_level, levels_gained)
+        logger.info(
+            "Admin granted xp",
+            extra={
+                "tg_id": user.tg_id,
+                "user_id": user.id,
+                "amount": amount,
+                "levels_gained": levels_gained,
+            },
+        )
 
 
 @router.message(Command("test_event_choice"))
