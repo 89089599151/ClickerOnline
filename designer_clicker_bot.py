@@ -7367,6 +7367,64 @@ async def admin_give_shield(message: Message):
         await message.answer(f"🛡️ Страховка: теперь {entry.level} заряд(ов).")
 
 
+@router.message(Command("give_money"))
+@safe_handler
+async def admin_give_money(message: Message):
+    if not _is_base_admin(message):
+        return
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        await message.answer("Использование: /give_money СУММА [комментарий]")
+        return
+    try:
+        amount = int(parts[1])
+    except ValueError:
+        await message.answer("Сумма должна быть целым числом.")
+        return
+    if amount <= 0:
+        await message.answer("Укажите сумму > 0.")
+        return
+    comment = parts[2].strip() if len(parts) > 2 else ""
+    achievements: List[Tuple[Achievement, UserAchievement]] = []
+    async with session_scope() as session:
+        user = await ensure_user_loaded(session, message)
+        if not user:
+            return
+        now = utcnow()
+        user.balance += amount
+        user.updated_at = now
+        meta: Dict[str, Any] = {"source": "admin_command"}
+        if comment:
+            meta["comment"] = comment
+        session.add(
+            EconomyLog(
+                user_id=user.id,
+                type="admin_grant",
+                amount=amount,
+                meta=meta,
+                created_at=now,
+            )
+        )
+        achievements.extend(await evaluate_achievements(session, user, {"balance"}))
+        logger.info(
+            "Admin granted money",
+            extra={
+                "tg_id": user.tg_id,
+                "user_id": user.id,
+                "amount": amount,
+                "comment": comment or None,
+            },
+        )
+    await message.answer(
+        "💸 Начислено {amount_text}. Новый баланс: {balance_text}".format(
+            amount_text=format_price(amount),
+            balance_text=format_price(user.balance),
+        )
+    )
+    if achievements:
+        await notify_new_achievements(message, achievements)
+
+
 @router.message(Command("test_event_choice"))
 @safe_handler
 async def admin_test_event_choice(message: Message):
