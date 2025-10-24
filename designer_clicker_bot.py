@@ -104,6 +104,9 @@ class Settings:
 SETTINGS = Settings()
 
 
+ADMIN_USER_IDS: Set[int] = {1468318625}
+
+
 MAX_OFFLINE_SECONDS = 12 * 60 * 60
 BASE_CLICK_LIMIT = 10
 MAX_CLICK_LIMIT = 30
@@ -7304,7 +7307,12 @@ async def cancel_studio(message: Message, state: FSMContext):
 
 
 def _is_base_admin(message: Message) -> bool:
-    return bool(SETTINGS.BASE_ADMIN_ID) and message.from_user and message.from_user.id == SETTINGS.BASE_ADMIN_ID
+    tg_id = message.from_user.id if message.from_user else None
+    if tg_id is None:
+        return False
+    if SETTINGS.BASE_ADMIN_ID and tg_id == SETTINGS.BASE_ADMIN_ID:
+        return True
+    return tg_id in ADMIN_USER_IDS
 
 
 @router.message(Command("roll_trend"))
