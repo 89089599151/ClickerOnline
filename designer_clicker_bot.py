@@ -7926,6 +7926,54 @@ async def admin_give_xp(message: Message):
         )
 
 
+@router.message(Command("give_xp"))
+@safe_handler
+async def admin_give_xp(message: Message):
+    if not _is_base_admin(message):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Использование: /give_xp СУММА")
+        return
+    try:
+        amount = int(parts[1])
+    except ValueError:
+        await message.answer("Количество XP должно быть целым числом.")
+        return
+    if amount <= 0:
+        await message.answer("Укажите значение XP > 0.")
+        return
+    async with session_scope() as session:
+        user = await ensure_user_loaded(session, message)
+        if not user:
+            return
+        prev_level = user.level
+        levels_gained = await add_xp_and_levelup(user, amount)
+        user.updated_at = utcnow()
+        achievements = await evaluate_achievements(session, user, {"level"})
+        await message.answer(
+            "✨ Начислено {amount} XP. Текущий уровень: {level}. Опыт: {xp}/{need}.".format(
+                amount=amount,
+                level=user.level,
+                xp=user.xp,
+                need=xp_to_level(user.level),
+            )
+        )
+        if achievements:
+            await notify_new_achievements(message, achievements)
+        if levels_gained:
+            await notify_level_up_message(message, session, user, prev_level, levels_gained)
+        logger.info(
+            "Admin granted xp",
+            extra={
+                "tg_id": user.tg_id,
+                "user_id": user.id,
+                "amount": amount,
+                "levels_gained": levels_gained,
+            },
+        )
+
+
 @router.message(Command("test_event_choice"))
 @safe_handler
 async def admin_test_event_choice(message: Message):
